@@ -30,13 +30,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <cstdio>
 #include <fstream>
+#include <cstdlib>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/foreach.hpp>
 
 #include "oslexec_pvt.h"
-#include "genclosure.h"
+#include "OSL/genclosure.h"
 #include "backendllvm.h"
+#include "OSL/oslquery.h"
 
 #include <OpenImageIO/strutil.h>
 #include <OpenImageIO/dassert.h>
@@ -44,6 +46,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <OpenImageIO/timer.h>
 #include <OpenImageIO/filesystem.h>
 #include <OpenImageIO/optparser.h>
+#include <OpenImageIO/fmath.h>
 
 using namespace OSL;
 using namespace OSL::pvt;
@@ -62,19 +65,7 @@ ShadingSystem::create (RendererServices *renderer,
                        TextureSystem *texturesystem,
                        ErrorHandler *err)
 {
-    // If client didn't supply an error handler, just use the default
-    // one that echoes to the terminal.
-    if (! err) {
-        err = & ErrorHandler::default_handler ();
-        ASSERT (err != NULL && "Can't create default ErrorHandler");
-    }
-
-    // Doesn't need a shared cache
-    ShadingSystemImpl *ts = new ShadingSystemImpl (renderer, texturesystem, err);
-#ifndef NDEBUG
-    err->info ("creating new ShadingSystem %p", (void *)ts);
-#endif
-    return ts;
+    return new ShadingSystem (renderer, texturesystem, err);
 }
 
 
@@ -82,19 +73,270 @@ ShadingSystem::create (RendererServices *renderer,
 void
 ShadingSystem::destroy (ShadingSystem *x)
 {
-    delete (ShadingSystemImpl *) x;
+    delete x;
 }
 
 
 
-ShadingSystem::ShadingSystem ()
+ShadingSystem::ShadingSystem (RendererServices *renderer,
+                              TextureSystem *texturesystem,
+                              ErrorHandler *err)
+    : m_impl (NULL)
 {
+    if (! err) {
+        err = & ErrorHandler::default_handler ();
+        ASSERT (err != NULL && "Can't create default ErrorHandler");
+    }
+    m_impl = new ShadingSystemImpl (renderer, texturesystem, err);
+#ifndef NDEBUG
+    err->info ("creating new ShadingSystem %p", (void *)this);
+#endif
 }
 
 
 
 ShadingSystem::~ShadingSystem ()
 {
+    delete m_impl;
+}
+
+
+
+bool
+ShadingSystem::attribute (string_view name, TypeDesc type, const void *val)
+{
+    return m_impl->attribute (name, type, val);
+}
+
+
+
+bool
+ShadingSystem::attribute (ShaderGroup *group, string_view name,
+                          TypeDesc type, const void *val)
+{
+    return m_impl->attribute (group, name, type, val);
+}
+
+
+
+bool
+ShadingSystem::getattribute (string_view name, TypeDesc type, void *val)
+{
+    return m_impl->getattribute (name, type, val);
+}
+
+
+
+bool
+ShadingSystem::getattribute (ShaderGroup *group, string_view name,
+                             TypeDesc type, void *val)
+{
+    return m_impl->getattribute (group, name, type, val);
+}
+
+
+
+bool
+ShadingSystem::LoadMemoryCompiledShader (string_view shadername,
+                                         string_view buffer)
+{
+    return m_impl->LoadMemoryCompiledShader (shadername, buffer);
+}
+
+
+
+ShaderGroupRef
+ShadingSystem::ShaderGroupBegin (string_view groupname)
+{
+    return m_impl->ShaderGroupBegin (groupname);
+}
+
+
+
+ShaderGroupRef
+ShadingSystem::ShaderGroupBegin (string_view groupname, string_view usage,
+                                 string_view groupspec)
+{
+    return m_impl->ShaderGroupBegin (groupname, usage, groupspec);
+}
+
+
+
+bool
+ShadingSystem::ShaderGroupEnd (void)
+{
+    return m_impl->ShaderGroupEnd();
+}
+
+
+
+bool
+ShadingSystem::Parameter (string_view name, TypeDesc t, const void *val)
+{
+    return m_impl->Parameter (name, t, val);
+}
+
+
+
+bool
+ShadingSystem::Parameter (string_view name, TypeDesc t, const void *val,
+                          bool lockgeom)
+{
+    return m_impl->Parameter (name, t, val, lockgeom);
+}
+
+
+
+bool
+ShadingSystem::Shader (string_view shaderusage, string_view shadername,
+                       string_view layername)
+{
+    return m_impl->Shader (shaderusage, shadername, layername);
+}
+
+
+
+bool
+ShadingSystem::ConnectShaders (string_view srclayer, string_view srcparam,
+                               string_view dstlayer, string_view dstparam)
+{
+    return m_impl->ConnectShaders (srclayer, srcparam, dstlayer, dstparam);
+}
+
+
+
+ShaderGroupRef
+ShadingSystem::state ()
+{
+    return m_impl->state();
+}
+
+
+
+bool
+ShadingSystem::ReParameter (ShaderGroup &group, string_view layername,
+                            string_view paramname, TypeDesc type,
+                            const void *val)
+{
+    return m_impl->ReParameter (group, layername, paramname, type, val);
+}
+
+
+
+PerThreadInfo *
+ShadingSystem::create_thread_info ()
+{
+    return m_impl->create_thread_info();
+}
+
+
+
+void
+ShadingSystem::destroy_thread_info (PerThreadInfo *threadinfo)
+{
+    return m_impl->destroy_thread_info (threadinfo);
+}
+
+
+
+ShadingContext *
+ShadingSystem::get_context (PerThreadInfo *threadinfo)
+{
+    return m_impl->get_context (threadinfo);
+}
+
+
+
+void
+ShadingSystem::release_context (ShadingContext *ctx)
+{
+    return m_impl->release_context (ctx);
+}
+
+
+
+bool
+ShadingSystem::execute (ShadingContext &ctx, ShaderGroup &sas,
+                        ShaderGlobals &ssg, bool run)
+{
+    return m_impl->execute (ctx, sas, ssg, run);
+}
+
+
+
+const void*
+ShadingSystem::get_symbol (ShadingContext &ctx, ustring name, TypeDesc &type)
+{
+    return m_impl->get_symbol (ctx, name, type);
+}
+
+
+
+std::string
+ShadingSystem::getstats (int level) const
+{
+    return m_impl->getstats (level);
+}
+
+
+
+void
+ShadingSystem::register_closure (string_view name, int id,
+                                 const ClosureParam *params,
+                                 PrepareClosureFunc prepare,
+                                 SetupClosureFunc setup,
+                                 int alignment)
+{
+    return m_impl->register_closure (name, id, params, prepare, setup, alignment);
+}
+
+
+
+bool
+ShadingSystem::query_closure (const char **name, int *id,
+                              const ClosureParam **params)
+{
+    return m_impl->query_closure (name, id, params);
+}
+
+
+
+int
+ShadingSystem::raytype_bit (ustring name)
+{
+    return m_impl->raytype_bit (name);
+}
+
+
+
+void
+ShadingSystem::optimize_all_groups (int nthreads)
+{
+    return m_impl->optimize_all_groups (nthreads);
+}
+
+
+
+TextureSystem *
+ShadingSystem::texturesys () const
+{
+    return m_impl->texturesys();
+}
+
+
+
+RendererServices *
+ShadingSystem::renderer () const
+{
+    return m_impl->renderer();
+}
+
+
+
+bool
+ShadingSystem::archive_shadergroup (ShaderGroup *group, string_view filename)
+{
+    return m_impl->archive_shadergroup (group, filename);
 }
 
 
@@ -240,6 +482,7 @@ ustring op_dowhile("dowhile"), op_for("for"), op_while("while");
 ustring op_exit("exit");
 ustring subimage("subimage"), subimagename("subimagename");
 ustring missingcolor("missingcolor"), missingalpha("missingalpha");
+ustring end("end");
 ustring uninitialized_string("!!!uninitialized!!!");
 };
 
@@ -259,12 +502,13 @@ ShadingSystemImpl::ShadingSystemImpl (RendererServices *renderer,
       m_range_checking(true), m_unknown_coordsys_error(true),
       m_greedyjit(false), m_countlayerexecs(false),
       m_max_warnings_per_thread(100),
+      m_profile(0),
       m_optimize(2),
       m_opt_simplify_param(true), m_opt_constant_fold(true),
       m_opt_stale_assign(true), m_opt_elide_useless_ops(true),
       m_opt_elide_unconnected_outputs(true),
       m_opt_peephole(true), m_opt_coalesce_temps(true),
-      m_opt_assign(true), m_opt_mix(true), m_opt_merge_instances(true),
+      m_opt_assign(true), m_opt_mix(true), m_opt_merge_instances(1),
       m_opt_fold_getattribute(true),
       m_opt_middleman(true),
       m_optimize_nondebug(false),
@@ -272,8 +516,9 @@ ShadingSystemImpl::ShadingSystemImpl (RendererServices *renderer,
       m_debug(0), m_llvm_debug(0),
       m_commonspace_synonym("world"),
       m_colorspace("Rec709"),
-      m_max_local_mem_KB(1024),
+      m_max_local_mem_KB(2048),
       m_compile_report(false),
+      m_buffer_printf(true),
       m_in_group (false),
       m_stat_opt_locking_time(0), m_stat_specialization_time(0),
       m_stat_total_llvm_time(0),
@@ -311,6 +556,7 @@ ShadingSystemImpl::ShadingSystemImpl (RendererServices *renderer,
     m_stat_pointcloud_gets = 0;
     m_stat_pointcloud_writes = 0;
     m_stat_layers_executed = 0;
+    m_stat_total_shading_time_ticks = 0;
 
     m_groups_to_compile_count = 0;
     m_threads_currently_compiling = 0;
@@ -329,7 +575,12 @@ ShadingSystemImpl::ShadingSystemImpl (RendererServices *renderer,
     }
 #endif
 
-    // If client didn't supply a texture system, create a new one
+    // If client didn't supply a texture system, use the one already held
+    // by the renderer (if it returns one).
+    if (! m_texturesys)
+        m_texturesys = renderer->texturesys();
+
+    // If we still don't have a texture system, create a new one
     if (! m_texturesys) {
         m_texturesys = TextureSystem::create (true /* shared */);
         ASSERT (m_texturesys);
@@ -358,10 +609,9 @@ ShadingSystemImpl::ShadingSystemImpl (RendererServices *renderer,
     // Allow environment variable to override default options
     const char *options = getenv ("OSL_OPTIONS");
     if (options)
-        ShadingSystem::attribute ("options", options);
+        attribute ("options", TypeDesc::STRING, &options);
 
     setup_op_descriptors ();
-    LLVM_Util::SetupLLVM ();
 }
 
 
@@ -369,164 +619,167 @@ ShadingSystemImpl::ShadingSystemImpl (RendererServices *renderer,
 static void
 shading_system_setup_op_descriptors (ShadingSystemImpl::OpDescriptorMap& op_descriptor)
 {
-#define OP2(alias,name,ll,f,simp)                                        \
+#define OP2(alias,name,ll,fold,simp,flag)                                \
     extern bool llvm_gen_##ll (BackendLLVM &rop, int opnum);             \
-    extern int  constfold_##f (RuntimeOptimizer &rop, int opnum);        \
+    extern int  constfold_##fold (RuntimeOptimizer &rop, int opnum);     \
     op_descriptor[ustring(#alias)] = OpDescriptor(#name, llvm_gen_##ll,  \
-                                                   constfold_##f, simp);
-#define OP(name,ll,f,simp) OP2(name,name,ll,f,simp)
+                                                  constfold_##fold, simp, flag);
+#define OP(name,ll,fold,simp,flag) OP2(name,name,ll,fold,simp,flag)
+#define TEX OpDescriptor::Tex
 
-    // name          llvmgen              folder         simple
-    OP (aassign,     aassign,             none,          false);
-    OP (abs,         generic,             abs,           true);
-    OP (acos,        generic,             acos,          true);
-    OP (add,         add,                 add,           true);
-    OP (and,         andor,               and,           true);
-    OP (area,        area,                deriv,         true);
-    OP (aref,        aref,                aref,          true);
-    OP (arraycopy,   arraycopy,           none,          false);
-    OP (arraylength, arraylength,         arraylength,   true);
-    OP (asin,        generic,             asin,          true);
-    OP (assign,      assign,              none,          true);
-    OP (atan,        generic,             none,          true);
-    OP (atan2,       generic,             none,          true);
-    OP (backfacing,  get_simple_SG_field, none,          true);
-    OP (bitand,      bitwise_binary_op,   none,          true);
-    OP (bitor,       bitwise_binary_op,   none,          true);
-    OP (blackbody,   blackbody,           none,          true);
-    OP (break,       loopmod_op,          none,          false);
-    OP (calculatenormal, calculatenormal, none,          true);
-    OP (ceil,        generic,             ceil,          true);
-    OP (cellnoise,   noise,               noise,         true);
-    OP (clamp,       clamp,               clamp,         true);
-    OP (closure,     closure,             none,          true);
-    OP (color,       construct_color,     triple,        true);
-    OP (compassign,  compassign,          compassign,    false);
-    OP (compl,       unary_op,            none,          true);
-    OP (compref,     compref,             compref,       true);
-    OP (concat,      generic,             concat,        true);
-    OP (continue,    loopmod_op,          none,          false);
-    OP (cos,         generic,             cos,           true);
-    OP (cosh,        generic,             none,          true);
-    OP (cross,       generic,             none,          true);
-    OP (degrees,     generic,             degrees,       true);
-    OP (determinant, generic,             none,          true);
-    OP (dict_find,   dict_find,           none,          false);
-    OP (dict_next,   dict_next,           none,          false);
-    OP (dict_value,  dict_value,          none,          false);
-    OP (distance,    generic,             none,          true);
-    OP (div,         div,                 div,           true);
-    OP (dot,         generic,             dot,           true);
-    OP (Dx,          DxDy,                deriv,         true);
-    OP (Dy,          DxDy,                deriv,         true);
-    OP (Dz,          Dz,                  deriv,         true);
-    OP (dowhile,     loop_op,             none,          false);
-    OP (end,         end,                 none,          false);
-    OP (endswith,    generic,             endswith,      true);
-    OP (environment, environment,         none,          true);
-    OP (eq,          compare_op,          eq,            true);
-    OP (erf,         generic,             erf,           true);
-    OP (erfc,        generic,             erfc,          true);
-    OP (error,       printf,              none,          false);
-    OP (exit,        return,              none,          false);
-    OP (exp,         generic,             exp,           true);
-    OP (exp2,        generic,             exp2,          true);
-    OP (expm1,       generic,             expm1,         true);
-    OP (fabs,        generic,             abs,           true);
-    OP (filterwidth, filterwidth,         deriv,         true);
-    OP (floor,       generic,             floor,         true);
-    OP (fmod,        modulus,             none,          true);
-    OP (for,         loop_op,             none,          false);
-    OP (format,      printf,              format,        true);
-    OP (functioncall, functioncall,       functioncall,  false);
-    OP (ge,          compare_op,          ge,            true);
-    OP (getattribute, getattribute,       getattribute,  false);
-    OP (getmatrix,   getmatrix,           getmatrix,     false);
-    OP (getmessage,  getmessage,          getmessage,    false);
-    OP (gettextureinfo, gettextureinfo,   gettextureinfo,false);
-    OP (gt,          compare_op,          gt,            true);
-    OP (if,          if,                  if,            false);
-    OP (inversesqrt, generic,             inversesqrt,   true);
-    OP (isconnected, generic,             none,          true);
-    OP (isfinite,    generic,             none,          true);
-    OP (isinf,       generic,             none,          true);
-    OP (isnan,       generic,             none,          true);
-    OP (le,          compare_op,          le,            true);
-    OP (length,      generic,             none,          true);
-    OP (log,         generic,             log,           true);
-    OP (log10,       generic,             log10,         true);
-    OP (log2,        generic,             log2,          true);
-    OP (logb,        generic,             logb,          true);
-    OP (lt,          compare_op,          lt,            true);
-    OP (luminance,   luminance,           none,          true);
-    OP (matrix,      matrix,              matrix,        true);
-    OP (max,         minmax,              max,           true);
-    OP (mxcompassign, mxcompassign,       none,          false);
-    OP (mxcompref,   mxcompref,           none,          true);
-    OP (min,         minmax,              min,           true);
-    OP (mix,         mix,                 mix,           true);
-    OP (mod,         modulus,             none,          true);
-    OP (mul,         mul,                 mul,           true);
-    OP (neg,         neg,                 neg,           true);
-    OP (neq,         compare_op,          neq,           true);
-    OP (noise,       noise,               noise,         true);
-    OP (normal,      construct_triple,    triple,        true);
-    OP (normalize,   generic,             normalize,     true);
-    OP (or,          andor,               or,            true);
-    OP (pnoise,      noise,               noise,         true);
-    OP (point,       construct_triple,    triple,        true);
-    OP (pointcloud_search, pointcloud_search, pointcloud_search, false);
-    OP (pointcloud_get, pointcloud_get,   pointcloud_get,false);
-    OP (pointcloud_write, pointcloud_write, none,        false);
-    OP (pow,         generic,             pow,           true);
-    OP (printf,      printf,              none,          false);
-    OP (psnoise,     noise,               noise,         true);
-    OP (radians,     generic,             radians,       true);
-    OP (raytype,     raytype,             none,          true);
-    OP (regex_match, regex,               none,          false);
-    OP (regex_search, regex,              regex_search,  false);
-    OP (return,      return,              none,          false);
-    OP (round,       generic,             none,          true);
-    OP (setmessage,  setmessage,          setmessage,    false);
-    OP (shl,         bitwise_binary_op,   none,          true);
-    OP (shr,         bitwise_binary_op,   none,          true);
-    OP (sign,        generic,             none,          true);
-    OP (sin,         generic,             sin,           true);
-    OP (sincos,      sincos,              none,          false);
-    OP (sinh,        generic,             none,          true);
-    OP (smoothstep,  generic,             none,          true);
-    OP (snoise,      noise,               noise,         true);
-    OP (spline,      spline,              none,          true);
-    OP (splineinverse, spline,            none,          true);
-    OP (split,       split,               split,         false);
-    OP (sqrt,        generic,             sqrt,          true);
-    OP (startswith,  generic,             none,          true);
-    OP (step,        generic,             none,          true);
-    OP (stof,        generic,             stof,          true);
-    OP (stoi,        generic,             stoi,          true);
-    OP (strlen,      generic,             strlen,        true);
-    OP2(strtof,stof, generic,             stof,          true);
-    OP2(strtoi,stoi, generic,             stoi,          true);
-    OP (sub,         sub,                 sub,           true);
-    OP (substr,      generic,             none,          true);
-    OP (surfacearea, get_simple_SG_field, none,          true);
-    OP (tan,         generic,             none,          true);
-    OP (tanh,        generic,             none,          true);
-    OP (texture,     texture,             texture,       true);
-    OP (texture3d,   texture3d,           none,          true);
-    OP (trace,       trace,               none,          false);
-    OP (transform,   transform,           transform,     true);
-    OP (transformn,  transform,           transform,     true);
-    OP (transformv,  transform,           transform,     true);
-    OP (transpose,   generic,             none,          true);
-    OP (trunc,       generic,             none,          true);
-    OP (useparam,    useparam,            useparam,      false);
-    OP (vector,      construct_triple,    triple,        true);
-    OP (warning,     printf,              warning,       false);
-    OP (wavelength_color, blackbody,      none,          true);
-    OP (while,       loop_op,             none,          false);
-    OP (xor,         bitwise_binary_op,   none,          true);
+    // name          llvmgen              folder         simple     flags
+    OP (aassign,     aassign,             aassign,       false,     0);
+    OP (abs,         generic,             abs,           true,      0);
+    OP (acos,        generic,             acos,          true,      0);
+    OP (add,         add,                 add,           true,      0);
+    OP (and,         andor,               and,           true,      0);
+    OP (area,        area,                deriv,         true,      0);
+    OP (aref,        aref,                aref,          true,      0);
+    OP (arraycopy,   arraycopy,           none,          false,     0);
+    OP (arraylength, arraylength,         arraylength,   true,      0);
+    OP (asin,        generic,             asin,          true,      0);
+    OP (assign,      assign,              none,          true,      0);
+    OP (atan,        generic,             none,          true,      0);
+    OP (atan2,       generic,             none,          true,      0);
+    OP (backfacing,  get_simple_SG_field, none,          true,      0);
+    OP (bitand,      bitwise_binary_op,   none,          true,      0);
+    OP (bitor,       bitwise_binary_op,   none,          true,      0);
+    OP (blackbody,   blackbody,           none,          true,      0);
+    OP (break,       loopmod_op,          none,          false,     0);
+    OP (calculatenormal, calculatenormal, none,          true,      0);
+    OP (ceil,        generic,             ceil,          true,      0);
+    OP (cellnoise,   noise,               noise,         true,      0);
+    OP (clamp,       clamp,               clamp,         true,      0);
+    OP (closure,     closure,             none,          true,      0);
+    OP (color,       construct_color,     triple,        true,      0);
+    OP (compassign,  compassign,          compassign,    false,     0);
+    OP (compl,       unary_op,            none,          true,      0);
+    OP (compref,     compref,             compref,       true,      0);
+    OP (concat,      generic,             concat,        true,      0);
+    OP (continue,    loopmod_op,          none,          false,     0);
+    OP (cos,         generic,             cos,           true,      0);
+    OP (cosh,        generic,             none,          true,      0);
+    OP (cross,       generic,             none,          true,      0);
+    OP (degrees,     generic,             degrees,       true,      0);
+    OP (determinant, generic,             none,          true,      0);
+    OP (dict_find,   dict_find,           none,          false,     0);
+    OP (dict_next,   dict_next,           none,          false,     0);
+    OP (dict_value,  dict_value,          none,          false,     0);
+    OP (distance,    generic,             none,          true,      0);
+    OP (div,         div,                 div,           true,      0);
+    OP (dot,         generic,             dot,           true,      0);
+    OP (Dx,          DxDy,                deriv,         true,      0);
+    OP (Dy,          DxDy,                deriv,         true,      0);
+    OP (Dz,          Dz,                  deriv,         true,      0);
+    OP (dowhile,     loop_op,             none,          false,     0);
+    OP (end,         end,                 none,          false,     0);
+    OP (endswith,    generic,             endswith,      true,      0);
+    OP (environment, environment,         none,          true,      TEX);
+    OP (eq,          compare_op,          eq,            true,      0);
+    OP (erf,         generic,             erf,           true,      0);
+    OP (erfc,        generic,             erfc,          true,      0);
+    OP (error,       printf,              none,          false,     0);
+    OP (exit,        return,              none,          false,     0);
+    OP (exp,         generic,             exp,           true,      0);
+    OP (exp2,        generic,             exp2,          true,      0);
+    OP (expm1,       generic,             expm1,         true,      0);
+    OP (fabs,        generic,             abs,           true,      0);
+    OP (filterwidth, filterwidth,         deriv,         true,      0);
+    OP (floor,       generic,             floor,         true,      0);
+    OP (fmod,        modulus,             none,          true,      0);
+    OP (for,         loop_op,             none,          false,     0);
+    OP (format,      printf,              format,        true,      0);
+    OP (functioncall, functioncall,       functioncall,  false,     0);
+    OP (ge,          compare_op,          ge,            true,      0);
+    OP (getattribute, getattribute,       getattribute,  false,     0);
+    OP (getmatrix,   getmatrix,           getmatrix,     false,     0);
+    OP (getmessage,  getmessage,          getmessage,    false,     0);
+    OP (gettextureinfo, gettextureinfo,   gettextureinfo,false,     TEX);
+    OP (gt,          compare_op,          gt,            true,      0);
+    OP (if,          if,                  if,            false,     0);
+    OP (inversesqrt, generic,             inversesqrt,   true,      0);
+    OP (isconnected, generic,             none,          true,      0);
+    OP (isfinite,    generic,             none,          true,      0);
+    OP (isinf,       generic,             none,          true,      0);
+    OP (isnan,       generic,             none,          true,      0);
+    OP (le,          compare_op,          le,            true,      0);
+    OP (length,      generic,             none,          true,      0);
+    OP (log,         generic,             log,           true,      0);
+    OP (log10,       generic,             log10,         true,      0);
+    OP (log2,        generic,             log2,          true,      0);
+    OP (logb,        generic,             logb,          true,      0);
+    OP (lt,          compare_op,          lt,            true,      0);
+    OP (luminance,   luminance,           none,          true,      0);
+    OP (matrix,      matrix,              matrix,        true,      0);
+    OP (max,         minmax,              max,           true,      0);
+    OP (mxcompassign, mxcompassign,       mxcompassign,  false,     0);
+    OP (mxcompref,   mxcompref,           none,          true,      0);
+    OP (min,         minmax,              min,           true,      0);
+    OP (mix,         mix,                 mix,           true,      0);
+    OP (mod,         modulus,             none,          true,      0);
+    OP (mul,         mul,                 mul,           true,      0);
+    OP (neg,         neg,                 neg,           true,      0);
+    OP (neq,         compare_op,          neq,           true,      0);
+    OP (noise,       noise,               noise,         true,      0);
+    OP (normal,      construct_triple,    triple,        true,      0);
+    OP (normalize,   generic,             normalize,     true,      0);
+    OP (or,          andor,               or,            true,      0);
+    OP (pnoise,      noise,               noise,         true,      0);
+    OP (point,       construct_triple,    triple,        true,      0);
+    OP (pointcloud_search, pointcloud_search, pointcloud_search,
+                                                         false,     TEX);
+    OP (pointcloud_get, pointcloud_get,   pointcloud_get,false,     TEX);
+    OP (pointcloud_write, pointcloud_write, none,        false,     0);
+    OP (pow,         generic,             pow,           true,      0);
+    OP (printf,      printf,              none,          false,     0);
+    OP (psnoise,     noise,               noise,         true,      0);
+    OP (radians,     generic,             radians,       true,      0);
+    OP (raytype,     raytype,             none,          true,      0);
+    OP (regex_match, regex,               none,          false,     0);
+    OP (regex_search, regex,              regex_search,  false,     0);
+    OP (return,      return,              none,          false,     0);
+    OP (round,       generic,             none,          true,      0);
+    OP (setmessage,  setmessage,          setmessage,    false,     0);
+    OP (shl,         bitwise_binary_op,   none,          true,      0);
+    OP (shr,         bitwise_binary_op,   none,          true,      0);
+    OP (sign,        generic,             none,          true,      0);
+    OP (sin,         generic,             sin,           true,      0);
+    OP (sincos,      sincos,              none,          false,     0);
+    OP (sinh,        generic,             none,          true,      0);
+    OP (smoothstep,  generic,             none,          true,      0);
+    OP (snoise,      noise,               noise,         true,      0);
+    OP (spline,      spline,              none,          true,      0);
+    OP (splineinverse, spline,            none,          true,      0);
+    OP (split,       split,               split,         false,     0);
+    OP (sqrt,        generic,             sqrt,          true,      0);
+    OP (startswith,  generic,             none,          true,      0);
+    OP (step,        generic,             none,          true,      0);
+    OP (stof,        generic,             stof,          true,      0);
+    OP (stoi,        generic,             stoi,          true,      0);
+    OP (strlen,      generic,             strlen,        true,      0);
+    OP2(strtof,stof, generic,             stof,          true,      0);
+    OP2(strtoi,stoi, generic,             stoi,          true,      0);
+    OP (sub,         sub,                 sub,           true,      0);
+    OP (substr,      generic,             substr,        true,      0);
+    OP (surfacearea, get_simple_SG_field, none,          true,      0);
+    OP (tan,         generic,             none,          true,      0);
+    OP (tanh,        generic,             none,          true,      0);
+    OP (texture,     texture,             texture,       true,      TEX);
+    OP (texture3d,   texture3d,           none,          true,      TEX);
+    OP (trace,       trace,               none,          false,     0);
+    OP (transform,   transform,           transform,     true,      0);
+    OP (transformn,  transform,           transform,     true,      0);
+    OP (transformv,  transform,           transform,     true,      0);
+    OP (transpose,   generic,             none,          true,      0);
+    OP (trunc,       generic,             none,          true,      0);
+    OP (useparam,    useparam,            useparam,      false,     0);
+    OP (vector,      construct_triple,    triple,        true,      0);
+    OP (warning,     printf,              warning,       false,     0);
+    OP (wavelength_color, blackbody,      none,          true,      0);
+    OP (while,       loop_op,             none,          false,     0);
+    OP (xor,         bitwise_binary_op,   none,          true,      0);
 #undef OP
+#undef TEX
 }
 
 
@@ -543,8 +796,11 @@ ShadingSystemImpl::setup_op_descriptors ()
 
 
 void
-ShadingSystemImpl::register_closure(const char *name, int id, const ClosureParam *params,
-                                    PrepareClosureFunc prepare, SetupClosureFunc setup)
+ShadingSystemImpl::register_closure (string_view name, int id,
+                                     const ClosureParam *params,
+                                     PrepareClosureFunc prepare,
+                                     SetupClosureFunc setup,
+                                     int alignment)
 {
     for (int i = 0; params && params[i].type != TypeDesc(); ++i) {
         if (params[i].key == NULL && params[i].type.size() != (size_t)params[i].field_size) {
@@ -552,7 +808,7 @@ ShadingSystemImpl::register_closure(const char *name, int id, const ClosureParam
             return;
         }
     }
-    m_closure_registry.register_closure(name, id, params, prepare, setup);
+    m_closure_registry.register_closure(name, id, params, prepare, setup, alignment);
 }
 
 
@@ -598,7 +854,7 @@ ShadingSystemImpl::~ShadingSystemImpl ()
 
 
 bool
-ShadingSystemImpl::attribute (const std::string &name, TypeDesc type,
+ShadingSystemImpl::attribute (string_view name, TypeDesc type,
                               const void *val)
 {
 #define ATTR_SET(_name,_ctype,_dst)                                     \
@@ -613,7 +869,7 @@ ShadingSystemImpl::attribute (const std::string &name, TypeDesc type,
     }
 
     if (name == "options" && type == TypeDesc::STRING) {
-        return OIIO::optparser (*(ShadingSystem *)this, *(const char **)val);
+        return OIIO::optparser (*this, *(const char **)val);
     }
 
     lock_guard guard (m_mutex);  // Thread safety
@@ -626,6 +882,7 @@ ShadingSystemImpl::attribute (const std::string &name, TypeDesc type,
     ATTR_SET ("debugnan", int, m_debugnan);  // back-compatible alias
     ATTR_SET ("debug_uninit", int, m_debug_uninit);
     ATTR_SET ("lockgeom", int, m_lockgeom_default);
+    ATTR_SET ("profile", int, m_profile);
     ATTR_SET ("optimize", int, m_optimize);
     ATTR_SET ("opt_simplify_param", int, m_opt_simplify_param);
     ATTR_SET ("opt_constant_fold", int, m_opt_constant_fold);
@@ -650,11 +907,14 @@ ShadingSystemImpl::attribute (const std::string &name, TypeDesc type,
     ATTR_SET ("max_warnings_per_thread", int, m_max_warnings_per_thread);
     ATTR_SET ("max_local_mem_KB", int, m_max_local_mem_KB);
     ATTR_SET ("compile_report", int, m_compile_report);
+    ATTR_SET ("buffer_printf", int, m_buffer_printf);
     ATTR_SET_STRING ("commonspace", m_commonspace_synonym);
     ATTR_SET_STRING ("debug_groupname", m_debug_groupname);
     ATTR_SET_STRING ("debug_layername", m_debug_layername);
     ATTR_SET_STRING ("opt_layername", m_opt_layername);
     ATTR_SET_STRING ("only_groupname", m_only_groupname);
+    ATTR_SET_STRING ("archive_groupname", m_archive_groupname);
+    ATTR_SET_STRING ("archive_filename", m_archive_filename);
 
     // cases for special handling
     if (name == "searchpath:shader" && type == TypeDesc::STRING) {
@@ -692,7 +952,7 @@ ShadingSystemImpl::attribute (const std::string &name, TypeDesc type,
 
 
 bool
-ShadingSystemImpl::getattribute (const std::string &name, TypeDesc type,
+ShadingSystemImpl::getattribute (string_view name, TypeDesc type,
                                  void *val)
 {
 #define ATTR_DECODE(_name,_ctype,_src)                                  \
@@ -716,6 +976,7 @@ ShadingSystemImpl::getattribute (const std::string &name, TypeDesc type,
     ATTR_DECODE ("debugnan", int, m_debugnan);  // back-compatible alias
     ATTR_DECODE ("debug_uninit", int, m_debug_uninit);
     ATTR_DECODE ("lockgeom", int, m_lockgeom_default);
+    ATTR_DECODE ("profile", int, m_profile);
     ATTR_DECODE ("optimize", int, m_optimize);
     ATTR_DECODE ("opt_simplify_param", int, m_opt_simplify_param);
     ATTR_DECODE ("opt_constant_fold", int, m_opt_constant_fold);
@@ -745,8 +1006,11 @@ ShadingSystemImpl::getattribute (const std::string &name, TypeDesc type,
     ATTR_DECODE_STRING ("debug_layername", m_debug_layername);
     ATTR_DECODE_STRING ("opt_layername", m_opt_layername);
     ATTR_DECODE_STRING ("only_groupname", m_only_groupname);
+    ATTR_DECODE_STRING ("archive_groupname", m_archive_groupname);
+    ATTR_DECODE_STRING ("archive_filename", m_archive_filename);
     ATTR_DECODE ("max_local_mem_KB", int, m_max_local_mem_KB);
     ATTR_DECODE ("compile_report", int, m_compile_report);
+    ATTR_DECODE ("buffer_printf", int, m_buffer_printf);
 
     ATTR_DECODE ("stat:masters", int, m_stat_shaders_loaded);
     ATTR_DECODE ("stat:groups", int, m_stat_groups);
@@ -811,56 +1075,144 @@ ShadingSystemImpl::getattribute (const std::string &name, TypeDesc type,
 
 
 
-void
-ShadingSystemImpl::error (const char *format, ...)
+bool
+ShadingSystemImpl::attribute (ShaderGroup *group, string_view name,
+                              TypeDesc type, const void *val)
 {
-    va_list ap;
-    va_start (ap, format);
-    std::string msg = Strutil::vformat (format, ap);
-    error (msg);
-    va_end (ap);
+    // No current group attributes to set
+    if (! group)
+        return attribute (name, type, val);
+    if (name == "renderer_outputs" && type.basetype == TypeDesc::STRING) {
+        group->m_renderer_outputs.clear ();
+        for (size_t i = 0;  i < type.numelements();  ++i)
+            group->m_renderer_outputs.push_back (ustring(((const char **)val)[i]));
+        return true;
+    }
+    return false;
+}
+
+
+
+bool
+ShadingSystemImpl::getattribute (ShaderGroup *group, string_view name,
+                                 TypeDesc type, void *val)
+{
+    if (! group)
+        return false;
+    if (name == "groupname" && type == TypeDesc::TypeString) {
+        *(ustring *)val = group->name();
+        return true;
+    }
+    if (name == "num_layers" && type == TypeDesc::TypeInt) {
+        *(int *)val = group->nlayers();
+        return true;
+    }
+    if (name == "layer_names" && type.basetype == TypeDesc::STRING) {
+        m_renderer_outputs.clear ();
+        size_t n = std::min (type.numelements(), (size_t)group->nlayers());
+        for (size_t i = 0;  i < n;  ++i)
+            ((ustring *)val)[i] = (*group)[i]->layername();
+        return true;
+    }
+    if (name == "num_textures_needed" && type == TypeDesc::TypeInt) {
+        if (! group->optimized())
+            optimize_group (*group);
+        *(int *)val = (int)group->m_textures_needed.size();
+        return true;
+    }
+    if (name == "textures_needed" && type.basetype == TypeDesc::PTR) {
+        if (! group->optimized())
+            optimize_group (*group);
+        size_t n = group->m_textures_needed.size();
+        *(ustring **)val = n ? &group->m_textures_needed[0] : NULL;
+        return true;
+    }
+    if (name == "unknown_textures_needed" && type == TypeDesc::TypeInt) {
+        if (! group->optimized())
+            optimize_group (*group);
+        *(int *)val = (int)group->m_unknown_textures_needed;
+        return true;
+    }
+
+    if (name == "num_closures_needed" && type == TypeDesc::TypeInt) {
+        if (! group->optimized())
+            optimize_group (*group);
+        *(int *)val = (int)group->m_closures_needed.size();
+        return true;
+    }
+    if (name == "closures_needed" && type.basetype == TypeDesc::PTR) {
+        if (! group->optimized())
+            optimize_group (*group);
+        size_t n = group->m_closures_needed.size();
+        *(ustring **)val = n ? &group->m_closures_needed[0] : NULL;
+        return true;
+    }
+    if (name == "unknown_closures_needed" && type == TypeDesc::TypeInt) {
+        if (! group->optimized())
+            optimize_group (*group);
+        *(int *)val = (int)group->m_unknown_closures_needed;
+        return true;
+    }
+
+    if (name == "num_globals_needed" && type == TypeDesc::TypeInt) {
+        if (! group->optimized())
+            optimize_group (*group);
+        *(int *)val = (int)group->m_globals_needed.size();
+        return true;
+    }
+    if (name == "globals_needed" && type.basetype == TypeDesc::PTR) {
+        if (! group->optimized())
+            optimize_group (*group);
+        size_t n = group->m_globals_needed.size();
+        *(ustring **)val = n ? &group->m_globals_needed[0] : NULL;
+        return true;
+    }
+
+    if (name == "num_userdata" && type == TypeDesc::TypeInt) {
+        if (! group->optimized())
+            optimize_group (*group);
+        *(int *)val = (int)group->m_userdata_names.size();
+        return true;
+    }
+    if (name == "userdata_names" && type.basetype == TypeDesc::PTR) {
+        if (! group->optimized())
+            optimize_group (*group);
+        size_t n = group->m_userdata_names.size();
+        *(ustring **)val = n ? &group->m_userdata_names[0] : NULL;
+        return true;
+    }
+    if (name == "userdata_types" && type.basetype == TypeDesc::PTR) {
+        if (! group->optimized())
+            optimize_group (*group);
+        size_t n = group->m_userdata_types.size();
+        *(TypeDesc **)val = n ? &group->m_userdata_types[0] : NULL;
+        return true;
+    }
+    if (name == "userdata_offsets" && type.basetype == TypeDesc::PTR) {
+        if (! group->optimized())
+            optimize_group (*group);
+        size_t n = group->m_userdata_offsets.size();
+        *(int **)val = n ? &group->m_userdata_offsets[0] : NULL;
+        return true;
+    }
+    if (name == "userdata_derivs" && type.basetype == TypeDesc::PTR) {
+        if (! group->optimized())
+            optimize_group (*group);
+        size_t n = group->m_userdata_derivs.size();
+        *(char **)val = n ? &group->m_userdata_derivs[0] : NULL;
+        return true;
+    }
+    if (name == "pickle" && type == TypeDesc::STRING) {
+        *(ustring *)val = ustring(group->serialize());
+        return true;
+    }
+    return false;
 }
 
 
 
 void
-ShadingSystemImpl::warning (const char *format, ...)
-{
-    va_list ap;
-    va_start (ap, format);
-    std::string msg = Strutil::vformat (format, ap);
-    warning (msg);
-    va_end (ap);
-}
-
-
-
-void
-ShadingSystemImpl::info (const char *format, ...)
-{
-    va_list ap;
-    va_start (ap, format);
-    std::string msg = Strutil::vformat (format, ap);
-    info (msg);
-    va_end (ap);
-}
-
-
-
-void
-ShadingSystemImpl::message (const char *format, ...)
-{
-    va_list ap;
-    va_start (ap, format);
-    std::string msg = Strutil::vformat (format, ap);
-    message (msg);
-    va_end (ap);
-}
-
-
-
-void
-ShadingSystemImpl::error (const std::string &msg)
+ShadingSystemImpl::error (const std::string &msg) const
 {
     lock_guard guard (m_errmutex);
     int n = 0;
@@ -878,7 +1230,7 @@ ShadingSystemImpl::error (const std::string &msg)
 
 
 void
-ShadingSystemImpl::warning (const std::string &msg)
+ShadingSystemImpl::warning (const std::string &msg) const
 {
     lock_guard guard (m_errmutex);
     int n = 0;
@@ -896,16 +1248,18 @@ ShadingSystemImpl::warning (const std::string &msg)
 
 
 void
-ShadingSystemImpl::info (const std::string &msg)
+ShadingSystemImpl::info (const std::string &msg) const
 {
+    lock_guard guard (m_errmutex);
     m_err->info (msg);
 }
 
 
 
 void
-ShadingSystemImpl::message (const std::string &msg)
+ShadingSystemImpl::message (const std::string &msg) const
 {
+    lock_guard guard (m_errmutex);
     m_err->message (msg);
 }
 
@@ -928,17 +1282,50 @@ ShadingSystemImpl::pointcloud_stats (int search, int get, int results,
 
 
 
+namespace {
+typedef std::pair<ustring,long long> GroupTimeVal;
+struct group_time_compare { // So looking forward to C++11 lambdas!
+    bool operator() (const GroupTimeVal &a, const GroupTimeVal &b) {
+        return a.second > b.second;
+    }
+};
+}
+
+
+
 std::string
 ShadingSystemImpl::getstats (int level) const
 {
     if (level <= 0)
         return "";
     std::ostringstream out;
-    out << "OSL ShadingSystem statistics (" << (void*)this << ")\n";
+    out << "OSL ShadingSystem statistics (" << (void*)this;
+    out << ") ver " << OSL_LIBRARY_VERSION_STRING << "\n";
     if (m_stat_shaders_requested == 0) {
         out << "  No shaders requested\n";
         return out.str();
     }
+
+    std::string opt;
+#define BOOLOPT(name) if (m_##name) opt += #name " "
+#define INTOPT(name) opt += Strutil::format(#name "=%d ", m_##name)
+    INTOPT (optimize);
+    INTOPT (llvm_optimize);
+    INTOPT (debug);
+    INTOPT (llvm_debug);
+    BOOLOPT (lazylayers);
+    BOOLOPT (lazyglobals);
+    BOOLOPT (clearmemory);
+    BOOLOPT (debugnan);
+    BOOLOPT (debug_uninit);
+    BOOLOPT (lockgeom_default);
+    BOOLOPT (range_checking);
+    BOOLOPT (greedyjit);
+    BOOLOPT (countlayerexecs);
+#undef BOOLOPT
+#undef INTOPT
+    out << "  Options:  " << Strutil::wordwrap(opt, 75, 12) << "\n";
+
     out << "  Shaders:\n";
     out << "    Requested: " << m_stat_shaders_requested << "\n";
     out << "    Loaded:    " << m_stat_shaders_loaded << "\n";
@@ -1054,6 +1441,43 @@ ShadingSystemImpl::getstats (int level) const
     size_t jitmem = LLVM_Util::total_jit_memory_held();
     out << "    LLVM JIT memory: " << Strutil::memformat(jitmem) << '\n';
 
+    if (m_profile) {
+        out << "  Execution profile:\n";
+        out << "    Total shader execution time: "
+            << Strutil::timeintervalformat(OIIO::Timer::seconds(m_stat_total_shading_time_ticks), 2)
+            << " (sum of all threads)\n";
+        // Account for times of any groups that haven't yet been destroyed
+        {
+            spin_lock lock (m_all_shader_groups_mutex);
+            for (size_t i = 0, e = m_all_shader_groups.size(); i < e; ++i) {
+                if (ShaderGroupRef g = m_all_shader_groups[i].lock()) {
+                    long long ticks = g->m_stat_total_shading_time_ticks;
+                    m_group_profile_times[g->name()] += ticks;
+                    g->m_stat_total_shading_time_ticks -= ticks;
+                }
+            }
+        }
+        {
+            spin_lock lock (m_stat_mutex);
+            std::vector<GroupTimeVal> grouptimes;
+            for (std::map<ustring,long long>::const_iterator m = m_group_profile_times.begin();
+                 m != m_group_profile_times.end(); ++m) {
+                grouptimes.push_back (GroupTimeVal(m->first, m->second));
+            }
+            std::sort (grouptimes.begin(), grouptimes.end(), group_time_compare());
+            if (grouptimes.size() > 5)
+                grouptimes.resize (5);
+            if (grouptimes.size())
+                out << "    Most expensive shader groups:\n";
+            for (std::vector<GroupTimeVal>::const_iterator i = grouptimes.begin();
+                     i != grouptimes.end(); ++i) {
+                out << "      " << Strutil::timeintervalformat(OIIO::Timer::seconds(i->second),2) 
+                    << ' ' << (i->first.size() ? i->first.c_str() : "<unnamed group>") << "\n";
+            }
+        }
+
+    }
+
     return out.str();
 }
 
@@ -1070,12 +1494,12 @@ ShadingSystemImpl::printstats () const
 
 
 bool
-ShadingSystemImpl::Parameter (const char *name, TypeDesc t, const void *val,
+ShadingSystemImpl::Parameter (string_view name, TypeDesc t, const void *val,
                               bool lockgeom)
 {
     // We work very hard not to do extra copies of the data.  First,
     // grow the pending list by one (empty) slot...
-    m_pending_params.resize (m_pending_params.size() + 1);
+    m_pending_params.grow();
     // ...then initialize it in place
     m_pending_params.back().init (name, t, 1, val);
     // If we have a possible geometric override (lockgeom=false), set the
@@ -1088,7 +1512,7 @@ ShadingSystemImpl::Parameter (const char *name, TypeDesc t, const void *val,
 
 
 bool
-ShadingSystemImpl::Parameter (const char *name, TypeDesc t, const void *val)
+ShadingSystemImpl::Parameter (string_view name, TypeDesc t, const void *val)
 {
     return Parameter (name, t, val, true);
 }
@@ -1096,7 +1520,7 @@ ShadingSystemImpl::Parameter (const char *name, TypeDesc t, const void *val)
 
 
 ShaderGroupRef
-ShadingSystemImpl::ShaderGroupBegin (const char *groupname)
+ShadingSystemImpl::ShaderGroupBegin (string_view groupname)
 {
     if (m_in_group) {
         error ("Nested ShaderGroupBegin() calls");
@@ -1125,52 +1549,41 @@ ShadingSystemImpl::ShaderGroupEnd (void)
             ShaderInstance *inst = (*m_curgroup)[layer];
             if (! inst)
                 continue;
-            if (m_lazylayers) {
-                // lazylayers option turned on: unconditionally run shaders
-                // with no outgoing connections ("root" nodes, including the
-                // last in the group) or shaders that alter global variables
-                // (unless 'lazyglobals' is turned on).
-                if (m_lazyglobals)
-                    inst->run_lazily (inst->outgoing_connections());
-                else
-                    inst->run_lazily (inst->outgoing_connections() &&
-                                      ! inst->writes_globals());
-#if 0
-                // Suggested warning below... but are there use cases where
-                // people want these to run (because they will extract the
-                // results they want from output params)?
-                if (! inst->outgoing_connections() && ! inst->writes_globals())
-                    warning ("Layer \"%s\" (shader %s) will run even though it appears to have no used results",
-                             inst->layername().c_str(), inst->shadername().c_str());
-#endif
-            } else {
-                // lazylayers option turned off: never run lazily
-                inst->run_lazily (false);
-            }
+            inst->compute_run_lazily ();
         }
 
-        merge_instances (*m_curgroup);
+        // Merge instances now if they really want it bad, otherwise wait
+        // until we optimize the group.
+        if (m_opt_merge_instances >= 2)
+            merge_instances (*m_curgroup);
     }
 
     {
-        // Record the group for later greedy JITing
-        spin_lock lock (m_groups_to_compile_mutex);
-        m_groups_to_compile.push_back (m_curgroup);
+        // Record the group in the SS's census of all extant groups
+        spin_lock lock (m_all_shader_groups_mutex);
+        m_all_shader_groups.push_back (m_curgroup);
         ++m_groups_to_compile_count;
     }
 
     m_in_group = false;
     m_group_use = ShadUseUnknown;
 
+    ustring groupname = m_curgroup->name();
+    if (groupname.size() && groupname == m_archive_groupname) {
+        std::string filename = m_archive_filename.string();
+        if (! filename.size())
+            filename = OIIO::Filesystem::filename (groupname.string()) + ".tar.gz";
+        archive_shadergroup (m_curgroup.get(), filename);
+    }
     return true;
 }
 
 
 
 bool
-ShadingSystemImpl::Shader (const char *shaderusage,
-                           const char *shadername,
-                           const char *layername)
+ShadingSystemImpl::Shader (string_view shaderusage,
+                           string_view shadername,
+                           string_view layername)
 {
     // Make sure we have a current attrib state
     if (! m_curgroup)
@@ -1218,8 +1631,8 @@ ShadingSystemImpl::Shader (const char *shaderusage,
 
 
 bool
-ShadingSystemImpl::ConnectShaders (const char *srclayer, const char *srcparam,
-                                   const char *dstlayer, const char *dstparam)
+ShadingSystemImpl::ConnectShaders (string_view srclayer, string_view srcparam,
+                                   string_view dstlayer, string_view dstparam)
 {
     // Basic sanity checks -- make sure it's a legal time to call
     // ConnectShaders, and that the layer and parameter names are not empty.
@@ -1227,11 +1640,11 @@ ShadingSystemImpl::ConnectShaders (const char *srclayer, const char *srcparam,
         error ("ConnectShaders can only be called within ShaderGroupBegin/End");
         return false;
     }
-    if (!srclayer || !srclayer[0] || !srcparam || !srcparam[0]) {
+    if (! srclayer.size() || ! srcparam.size()) {
         error ("ConnectShaders: badly formed source layer/parameter");
         return false;
     }
-    if (!dstlayer || !dstlayer[0] || !dstparam || !dstparam[0]) {
+    if (! dstlayer.size() || ! dstparam.size()) {
         error ("ConnectShaders: badly formed destination layer/parameter");
         return false;
     }
@@ -1261,6 +1674,8 @@ ShadingSystemImpl::ConnectShaders (const char *srclayer, const char *srcparam,
     ConnectedParam srccon = decode_connected_param(srcparam, srclayer, srcinst);
     ConnectedParam dstcon = decode_connected_param(dstparam, dstlayer, dstinst);
     if (! (srccon.valid() && dstcon.valid())) {
+        error ("ConnectShaders: cannot connect a %s (%s) to a %s (%s), invalid connection",
+               srccon.type, srcparam, dstcon.type, dstparam);
         return false;
     }
 
@@ -1271,10 +1686,10 @@ ShadingSystemImpl::ConnectShaders (const char *srclayer, const char *srcparam,
         // as connections between their respective fields.
         StructSpec *srcstruct = srccon.type.structspec();
         StructSpec *dststruct = dstcon.type.structspec();
-        for (size_t i = 0;  i < srcstruct->numfields();  ++i) {
-            std::string s = Strutil::format("%s.%s", srcparam, srcstruct->field(i).name.c_str());
-            std::string d = Strutil::format("%s.%s", dstparam, dststruct->field(i).name.c_str());
-            ConnectShaders (srclayer, s.c_str(), dstlayer, d.c_str());
+        for (size_t i = 0;  i < (size_t)srcstruct->numfields();  ++i) {
+            std::string s = Strutil::format("%s.%s", srcparam, srcstruct->field(i).name);
+            std::string d = Strutil::format("%s.%s", dstparam, dststruct->field(i).name);
+            ConnectShaders (srclayer, s, dstlayer, d);
         }
         return true;
     }
@@ -1291,10 +1706,233 @@ ShadingSystemImpl::ConnectShaders (const char *srclayer, const char *srcparam,
     srcinst->outgoing_connections (true);
 
     if (debug())
-        m_err->message ("ConnectShaders %s %s -> %s %s\n",
-                        srclayer, srcparam, dstlayer, dstparam);
+        message ("ConnectShaders %s %s -> %s %s\n",
+                 srclayer, srcparam, dstlayer, dstparam);
 
     return true;
+}
+
+
+
+ShaderGroupRef
+ShadingSystemImpl::ShaderGroupBegin (string_view groupname,
+                                     string_view usage,
+                                     string_view groupspec)
+{
+    ShaderGroupRef g = ShaderGroupBegin (groupname);
+    bool err = false;
+    std::string errdesc;
+    std::vector<int> intvals;
+    std::vector<float> floatvals;
+    std::vector<ustring> stringvals;
+    string_view p = groupspec;   // parse view
+    // std::cout << "!!!!!\n---\n" << groupspec << "\n---\n\n";
+    while (p.size()) {
+        Strutil::skip_whitespace (p);
+        if (! p.size())
+            break;
+        while (Strutil::parse_char (p, ';'))  // skip blank statements
+            ;
+        string_view keyword = Strutil::parse_word (p);
+
+        if (keyword == "shader") {
+            string_view shadername = Strutil::parse_identifier (p);
+            Strutil::skip_whitespace (p);
+            string_view layername = Strutil::parse_until (p, " \t\r\n,;");
+            Shader (usage, shadername, layername);
+            Strutil::parse_char (p, ';') || Strutil::parse_char (p, ',');
+            Strutil::skip_whitespace (p);
+            continue;
+        }
+
+        if (keyword == "connect") {
+            Strutil::skip_whitespace (p);
+            string_view lay1 = Strutil::parse_until (p, " \t\r\n.");
+            Strutil::parse_char (p, '.');
+            string_view param1 = Strutil::parse_until (p, " \t\r\n,;");
+            Strutil::skip_whitespace (p);
+            string_view lay2 = Strutil::parse_until (p, " \t\r\n.");
+            Strutil::parse_char (p, '.');
+            string_view param2 = Strutil::parse_until (p, " \t\r\n,;");
+            ConnectShaders (lay1, param1, lay2, param2);
+            Strutil::parse_char (p, ';') || Strutil::parse_char (p, ',');
+            Strutil::skip_whitespace (p);
+            continue;
+        }
+
+        // Remaining case -- it should be declaring a parameter.
+        string_view typestring;
+        if (keyword == "param") {
+            typestring = Strutil::parse_word (p);
+        } else if (TypeDesc(keyword.str().c_str()) != TypeDesc::UNKNOWN) {
+            // compatibility: let the 'param' keyword be optional, if it's
+            // obvious that it's a type name.
+            typestring = keyword;
+        } else {
+            err = true;
+            errdesc = Strutil::format ("Unknown statement (expected 'param', "
+                                       "'shader', or 'connect'): \"%s\"",
+                                       keyword);
+            break;
+        }
+        TypeDesc type;
+        if (typestring == "int")
+            type = TypeDesc::TypeInt;
+        else if (typestring == "float")
+            type = TypeDesc::TypeFloat;
+        else if (typestring == "color")
+            type = TypeDesc::TypeColor;
+        else if (typestring == "point")
+            type = TypeDesc::TypePoint;
+        else if (typestring == "vector")
+            type = TypeDesc::TypeVector;
+        else if (typestring == "normal")
+            type = TypeDesc::TypeNormal;
+        else if (typestring == "matrix")
+            type = TypeDesc::TypeMatrix;
+        else if (typestring == "string")
+            type = TypeDesc::TypeString;
+        else {
+            err = true;
+            errdesc = Strutil::format ("Unknown type: %s", typestring);
+            break;  // error
+        }
+        if (Strutil::parse_char (p, '[')) {
+            int arraylen;
+            Strutil::parse_int (p, arraylen);
+            Strutil::parse_char (p, ']');
+            type.arraylen = arraylen;
+        }
+        std::string paramname_string;
+        while (1) {
+            paramname_string += Strutil::parse_identifier (p);
+            Strutil::skip_whitespace (p);
+            if (Strutil::parse_char (p, '.')) {
+                paramname_string += ".";
+            } else {
+                break;
+            }
+        }
+        string_view paramname (paramname_string);
+        int lockgeom = true;
+        int nvals = type.numelements() * type.aggregate;
+        if (type.basetype == TypeDesc::INT) {
+            intvals.clear ();
+            intvals.resize (nvals, 0);
+            for (int i = 0; i < nvals; ++i) {
+                if (! Strutil::parse_int (p, intvals[i]))
+                    break;
+            }
+            Parameter (paramname, type, &intvals[0], lockgeom);
+        } else if (type.basetype == TypeDesc::FLOAT) {
+            floatvals.clear ();
+            floatvals.resize (nvals, 0.0f);
+            for (int i = 0; i < nvals; ++i) {
+                if (! Strutil::parse_float (p, floatvals[i]))
+                    break;
+            }
+            Parameter (paramname, type, &floatvals[0], lockgeom);
+        } else if (type.basetype == TypeDesc::STRING) {
+            stringvals.clear ();
+            stringvals.resize (nvals);
+            for (int i = 0; i < nvals; ++i) {
+                std::string unescaped;
+                string_view s;
+                Strutil::skip_whitespace (p);
+                if (p.size() && p[0] == '\"') {
+                    if (! Strutil::parse_string (p, s))
+                        break;
+                    unescaped = Strutil::unescape_chars (s);
+                    s = unescaped;
+                }
+                else {
+                    s = Strutil::parse_until (p, " \t\r\n;");
+                    if (s.size() == 0)
+                        break;
+                }
+                stringvals[i] = ustring(s);
+            }
+            Parameter (paramname, type, &stringvals[0], lockgeom);
+        }
+
+        if (Strutil::parse_prefix (p, "[[")) {  // hints
+            do {
+                Strutil::skip_whitespace (p);
+                string_view hint_typename = Strutil::parse_word (p);
+                string_view hint_name = Strutil::parse_identifier (p);
+                TypeDesc hint_type (hint_typename.str().c_str());
+                if (! hint_name.size() || hint_type == TypeDesc::UNKNOWN) {
+                    err = true;
+                    errdesc = "malformed hint";
+                    break;
+                }
+                if (! Strutil::parse_char (p, '=')) {
+                    err = true;
+                    errdesc = "hint expected value";
+                    break;
+                }
+                if (hint_name == "lockgeom" && hint_type == TypeDesc::INT) {
+                    if (! Strutil::parse_int (p, lockgeom)) {
+                        err = true;
+                        errdesc = Strutil::format ("hint %s expected int value", hint_name);
+                        break;
+                    }
+                } else {
+                    err = true;
+                    errdesc = Strutil::format ("unknown hint '%s %s'",
+                                               hint_type, hint_name);
+                    break;
+                }
+            } while (Strutil::parse_char (p, ','));
+            if (err)
+                break;
+            if (! Strutil::parse_prefix (p, "]]")) {
+                err = true;
+                errdesc = "malformed hint";
+                break;
+            }
+        }
+
+        if (type.basetype == TypeDesc::INT) {
+            Parameter (paramname, type, &intvals[0], lockgeom);
+        } else if (type.basetype == TypeDesc::FLOAT) {
+            Parameter (paramname, type, &floatvals[0], lockgeom);
+        } else if (type.basetype == TypeDesc::STRING) {
+            Parameter (paramname, type, &stringvals[0], lockgeom);
+        }
+
+        Strutil::skip_whitespace (p);
+        if (! p.size())
+            break;
+
+        if (Strutil::parse_char (p, ';') || Strutil::parse_char (p, ','))
+            continue;  // next command
+
+        Strutil::parse_until_char (p, ';');
+        if (! Strutil::parse_char (p, ';')) {
+            err = true;
+            errdesc = "semicolon expected";
+        }
+    }
+
+    if (err) {
+        if (! groupname.size())
+            groupname = "<unknown>";
+        size_t offset = p.data() - groupspec.data();
+        size_t begin_stmt = std::min (groupspec.find_last_of (';', offset),
+                                      groupspec.find_last_of (',', offset));
+        size_t end_stmt = groupspec.find_first_of (';', begin_stmt+1);
+        string_view statement = groupspec.substr (begin_stmt+1, end_stmt-begin_stmt);
+        error ("ShaderGroupBegin: error parsing group description: %s\n"
+               "        group: \"%s\"\n"
+               "        problem might be here: %s\n",
+               errdesc, groupname, statement);
+        if (debug())
+            info ("Broken group was:\n---%s\n---\n", groupspec);
+        return ShaderGroupRef();
+    }
+
+    return g;
 }
 
 
@@ -1304,8 +1942,8 @@ ShadingSystemImpl::state ()
 {
     {
         // Record the state for later greedy JITing
-        spin_lock lock (m_groups_to_compile_mutex);
-        m_groups_to_compile.push_back (m_curgroup);
+        spin_lock lock (m_all_shader_groups_mutex);
+        m_all_shader_groups.push_back (m_curgroup);
         ++m_groups_to_compile_count;
     }
     return m_curgroup;
@@ -1313,9 +1951,17 @@ ShadingSystemImpl::state ()
 
 
 
+std::string
+ShadingSystemImpl::serialize_group (ShaderGroup *group)
+{
+    return group->serialize ();
+}
+
+
+
 bool
-ShadingSystemImpl::ReParameter (ShaderGroup &group, const char *layername_,
-                                const char *paramname,
+ShadingSystemImpl::ReParameter (ShaderGroup &group, string_view layername_,
+                                string_view paramname,
                                 TypeDesc type, const void *val)
 {
     // Find the named layer
@@ -1387,6 +2033,7 @@ ShadingSystemImpl::get_context (PerThreadInfo *threadinfo)
 void
 ShadingSystemImpl::release_context (ShadingContext *ctx)
 {
+    ctx->process_errors ();
     ctx->thread_info()->context_pool.push (ctx);
 }
 
@@ -1396,7 +2043,7 @@ bool
 ShadingSystemImpl::execute (ShadingContext &ctx, ShaderGroup &group,
                             ShaderGlobals &ssg, bool run)
 {
-    return ctx.execute (ShadUseSurface, group, ssg, run);
+    return ctx.execute (group, ssg, run);
 }
 
 
@@ -1405,7 +2052,7 @@ const void *
 ShadingSystemImpl::get_symbol (ShadingContext &ctx, ustring name,
                                TypeDesc &type)
 {
-    Symbol *sym = ctx.symbol (ShadUseSurface, name);
+    Symbol *sym = ctx.symbol (name);
     if (sym) {
         type = sym->typespec().simpletype();
         return ctx.symbol_data (*sym);
@@ -1436,16 +2083,17 @@ ShadingSystemImpl::find_named_layer_in_group (ustring layername,
 
 
 ConnectedParam
-ShadingSystemImpl::decode_connected_param (const char *connectionname,
-                                   const char *layername, ShaderInstance *inst)
+ShadingSystemImpl::decode_connected_param (string_view connectionname,
+                                   string_view layername, ShaderInstance *inst)
 {
     ConnectedParam c;  // initializes to "invalid"
 
     // Look for a bracket in the "parameter name"
-    const char *bracket = strchr (connectionname, '[');
+    size_t bracketpos = connectionname.find ('[');
+    const char *bracket = bracketpos == string_view::npos ? NULL
+                                   : connectionname.data()+bracketpos;
     // Grab just the part of the param name up to the bracket
-    ustring param (connectionname, 0,
-                   bracket ? size_t(bracket-connectionname) : ustring::npos);
+    ustring param (connectionname, 0, bracketpos);
 
     // Search for the param with that name, fail if not found
     c.param = inst->findsymbol (param);
@@ -1522,10 +2170,20 @@ ShadingSystemImpl::raytype_bit (ustring name)
 
 
 bool
-ShadingSystemImpl::is_renderer_output (ustring name) const
+ShadingSystemImpl::is_renderer_output (ustring layername, ustring paramname,
+                                       ShaderGroup *group) const
 {
+    if (group) {
+        const std::vector<ustring> &aovs (group->m_renderer_outputs);
+        if (std::find (aovs.begin(), aovs.end(), paramname) != aovs.end())
+            return true;
+        // Try "layer.name"
+        ustring name2 = ustring::format ("%s.%s", layername, paramname);
+        if (std::find (aovs.begin(), aovs.end(), name2) != aovs.end())
+            return true;
+    }
     const std::vector<ustring> &aovs (m_renderer_outputs);
-    return std::find (aovs.begin(), aovs.end(), name) != aovs.end();
+    return std::find (aovs.begin(), aovs.end(), paramname) != aovs.end();
 }
 
 
@@ -1602,6 +2260,26 @@ ShadingSystemImpl::optimize_group (ShaderGroup &group)
     RuntimeOptimizer rop (*this, group, ctx);
     rop.run ();
 
+    // Copy some info recorted by the RuntimeOptimizer into the group
+    group.m_unknown_textures_needed = rop.m_unknown_textures_needed;
+    BOOST_FOREACH (ustring f, rop.m_textures_needed)
+        group.m_textures_needed.push_back (f);
+    group.m_unknown_closures_needed = rop.m_unknown_closures_needed;
+    BOOST_FOREACH (ustring f, rop.m_closures_needed)
+        group.m_closures_needed.push_back (f);
+    BOOST_FOREACH (ustring f, rop.m_globals_needed)
+        group.m_globals_needed.push_back (f);
+    size_t num_userdata = rop.m_userdata_needed.size();
+    group.m_userdata_names.reserve (num_userdata);
+    group.m_userdata_types.reserve (num_userdata);
+    group.m_userdata_offsets.resize (num_userdata, 0);
+    group.m_userdata_derivs.reserve (num_userdata);
+    BOOST_FOREACH (const UserDataNeeded& n, rop.m_userdata_needed) {
+        group.m_userdata_names.push_back (n.name);
+        group.m_userdata_types.push_back (n.type);
+        group.m_userdata_derivs.push_back (n.derivs);
+    }
+
     BackendLLVM lljitter (*this, group, ctx);
     lljitter.run ();
 
@@ -1623,28 +2301,21 @@ ShadingSystemImpl::optimize_group (ShaderGroup &group)
                                           lljitter.m_llvm_local_mem);
     m_stat_groups_compiled += 1;
     m_stat_instances_compiled += group.nlayers();
+    m_groups_to_compile_count -= 1;
 }
 
 
 
-static void optimize_all_groups_wrapper (ShadingSystemImpl *ss)
+static void optimize_all_groups_wrapper (ShadingSystemImpl *ss, int mythread, int totalthreads)
 {
-    ss->optimize_all_groups (1);
+    ss->optimize_all_groups (1, mythread, totalthreads);
 }
 
 
 
 void
-ShadingSystemImpl::optimize_all_groups (int nthreads)
+ShadingSystemImpl::optimize_all_groups (int nthreads, int mythread, int totalthreads)
 {
-    if (! m_greedyjit) {
-        // No greedy JIT, just free any groups we've recorded
-        spin_lock lock (m_groups_to_compile_mutex);
-        m_groups_to_compile.clear ();
-        m_groups_to_compile_count = 0;
-        return;
-    }
-
     // Spawn a bunch of threads to do this in parallel -- just call this
     // routine again (with threads=1) for each thread.
     if (nthreads < 1)  // threads <= 0 means use all hardware available
@@ -1656,25 +2327,28 @@ ShadingSystemImpl::optimize_all_groups (int nthreads)
         boost::thread_group threads;
         m_threads_currently_compiling += nthreads;
         for (int t = 0;  t < nthreads;  ++t)
-            threads.add_thread (new boost::thread (optimize_all_groups_wrapper, this));
+            threads.add_thread (new boost::thread (optimize_all_groups_wrapper, this, t, nthreads));
         threads.join_all ();
         m_threads_currently_compiling -= nthreads;
         return;
     }
 
     // And here's the single thread case
-    while (m_groups_to_compile_count) {
-        ShaderGroupRef group;
-        {
-            spin_lock lock (m_groups_to_compile_mutex);
-            if (m_groups_to_compile.size() == 0)
-                return;  // Nothing left to compile
-            group = m_groups_to_compile.back ();
-            m_groups_to_compile.pop_back ();
-        }
-        --m_groups_to_compile_count;
-        if (! group.unique()) {   // don't compile if nobody recorded it but us
-            optimize_group (*group);
+    size_t ngroups = 0;
+    {
+        spin_lock lock (m_all_shader_groups_mutex);
+        ngroups = m_all_shader_groups.size();
+    }
+    for (size_t i = 0;  i < ngroups;  ++i) {
+        // Assign to threads based on mod of totalthreads
+        if ((i % totalthreads) == (unsigned)mythread) {
+            ShaderGroupRef group;
+            {
+                spin_lock lock (m_all_shader_groups_mutex);
+                group = m_all_shader_groups[i].lock();
+            }
+            if (group)
+                optimize_group (*group);
         }
     }
 }
@@ -1720,13 +2394,15 @@ ShadingSystemImpl::merge_instances (ShaderGroup &group, bool post_opt)
     int nlayers = group.nlayers();
 
     // Loop over all layers...
-    for (int a = 0;  a < nlayers;  ++a) {
+    for (int a = 0;  a < nlayers-1;  ++a) {
         if (group[a]->unused())    // Don't merge a layer that's not used
             continue;
         // Check all later layers...
         for (int b = a+1;  b < nlayers;  ++b) {
             if (group[b]->unused())    // Don't merge a layer that's not used
                 continue;
+            if (b == nlayers-1)   // Don't merge the last layer -- causes
+                continue;         // many tears because it's the group entry
 
             // Now we have two used layers, a and b, to examine.
             // See if they are mergeable (identical).  All the heavy
@@ -1793,8 +2469,102 @@ ShadingSystemImpl::merge_instances (ShaderGroup &group, bool post_opt)
 
 
 
-void ClosureRegistry::register_closure(const char *name, int id, const ClosureParam *params,
-                                       PrepareClosureFunc prepare, SetupClosureFunc setup)
+bool
+ShadingSystemImpl::archive_shadergroup (ShaderGroup *group, string_view filename)
+{
+    std::string filename_base = OIIO::Filesystem::filename(filename);
+    std::string extension;
+    for (std::string e = OIIO::Filesystem::extension(filename);
+         e.size() && filename.size();
+         e = OIIO::Filesystem::extension(filename)) {
+        extension = e + extension;
+        filename.remove_suffix (e.size());
+    }
+    if (extension.size() < 2 || extension[0] != '.') {
+        error ("archive_shadergroup: invalid filename \"%s\"", filename);
+        return false;
+    }
+    filename_base.erase (filename_base.size() - extension.size());
+
+    std::string pattern = OIIO::Filesystem::temp_directory_path() + "OSL-%%%%-%%%%";
+    if (! pattern.size()) {
+        error ("archive_shadergroup: Could not find a temp directory");
+        return false;
+    }
+    std::string tmpdir = OIIO::Filesystem::unique_path(pattern);
+    if (! pattern.size()) {
+        error ("archive_shadergroup: Could not find a temp filename");
+        return false;
+    }
+    std::string errmessage;
+    bool dir_ok = OIIO::Filesystem::create_directory (tmpdir, errmessage);
+    if (! dir_ok) {
+        error ("archive_shadergroup: Could not create temp directory: %s",
+               errmessage);
+        return false;
+    }
+
+    bool ok = true;
+    std::string groupfilename = tmpdir + "/shadergroup";
+    std::ofstream groupfile (groupfilename.c_str());
+    if (groupfile.good()) {
+        groupfile << group->serialize();
+        groupfile.close ();
+    } else {
+        error ("archive_shadergroup: Could not open shadergroup file");
+        ok = false;
+    }
+
+    std::string filename_list = "shadergroup";
+    {
+        boost::lock_guard<ShaderGroup> lock (*group);
+        for (int i = 0, nl = group->nlayers(); i < nl; ++i) {
+            std::string osofile = (*group)[i]->master()->osofilename();
+            std::string osoname = OIIO::Filesystem::filename (osofile);
+            std::string localfile = tmpdir + "/" + osoname;
+            OIIO::Filesystem::copy (osofile, localfile);
+            filename_list += " " + osoname;
+        }
+    }
+
+    if (extension == ".tar" || extension == ".tar.gz" || extension == ".tgz") {
+        std::string z = Strutil::ends_with (extension, "gz") ? "-z" : "";
+        std::string cmd = Strutil::format ("tar -c %s -C %s -f %s%s %s",
+                                           z, tmpdir, filename, extension,
+                                           filename_list);
+        // std::cout << "Command =\n" << cmd << "\n";
+        if (system (cmd.c_str()) != 0) {
+            error ("archive_shadergroup: executing tar command failed");
+            ok = false;
+        }
+
+    } else if (extension == ".zip") {
+        std::string cmd = Strutil::format ("zip -q %s%s %s",
+                                           filename, extension,
+                                           filename_list);
+        // std::cout << "Command =\n" << cmd << "\n";
+        if (system (cmd.c_str()) != 0) {
+            error ("archive_shadergroup: executing zip command failed");
+            ok = false;
+        }
+    } else {
+        error ("archive_shadergroup: no archiving/compressing command");
+        ok = false;
+    }
+
+    OIIO::Filesystem::remove_all (tmpdir);
+
+    return ok;
+}
+
+
+
+void
+ClosureRegistry::register_closure (string_view name, int id,
+                                   const ClosureParam *params,
+                                   PrepareClosureFunc prepare,
+                                   SetupClosureFunc setup,
+                                   int alignment)
 {
     if (m_closure_table.size() <= (size_t)id)
         m_closure_table.resize(id + 1);
@@ -1818,12 +2588,14 @@ void ClosureRegistry::register_closure(const char *name, int id, const ClosurePa
     }
     entry.prepare = prepare;
     entry.setup = setup;
+    entry.alignment = alignment;
     m_closure_name_to_id[ustring(name)] = id;
 }
 
 
 
-const ClosureRegistry::ClosureEntry *ClosureRegistry::get_entry(ustring name)const
+const ClosureRegistry::ClosureEntry *
+ClosureRegistry::get_entry(ustring name) const
 {
     std::map<ustring, int>::const_iterator i = m_closure_name_to_id.find(name);
     if (i != m_closure_name_to_id.end())
@@ -1839,6 +2611,273 @@ const ClosureRegistry::ClosureEntry *ClosureRegistry::get_entry(ustring name)con
 
 }; // namespace pvt
 OSL_NAMESPACE_EXIT
+
+
+
+bool
+OSL::OSLQuery::init (const ShaderGroup *group, int layernum)
+{
+    geterror();   // clear the error, we're newly initializing
+    if (! group) {
+        error ("No group pointer supplied.");
+        return false;
+    }
+    if (layernum < 0 || layernum >= group->nlayers()) {
+        error ("Invalid layer number %d (valid indices: 0-%d).",
+               layernum, group->nlayers()-1);
+        return false;
+    }
+
+    const ShaderMaster *master = (*group)[layernum]->master();
+    m_shadername = master->shadername();
+    m_shadertypename = master->shadertypename();
+    m_params.clear();
+    if (int nparams = master->num_params()) {
+        m_params.resize (nparams);
+        for (int i = 0;  i < nparams;  ++i) {
+            const Symbol *sym = master->symbol (i);
+            Parameter &p (m_params[i]);
+            p.name = sym->name().string();
+            const TypeSpec &ts (sym->typespec());
+            p.type = ts.simpletype();
+            p.isoutput = (sym->symtype() == SymTypeOutputParam);
+            p.varlenarray = (p.type.arraylen < 0);
+            p.isstruct = ts.is_structure() || ts.is_structure_array();
+            p.isclosure = ts.is_closure_based();
+            p.data = sym->data();
+            // In this mode, we don't fill in idefault, fdefault, sdefault,
+            // or spacename.
+            p.idefault.clear();
+            p.fdefault.clear();
+            p.sdefault.clear();
+            p.spacename.clear();
+            p.fields.clear();  // don't bother filling this out
+            if (StructSpec *ss = ts.structspec()) {
+                p.structname = ss->name().string();
+                for (size_t i = 0, e = ss->numfields();  i < e;  ++i)
+                    p.fields.push_back (ss->field(i).name);
+            } else {
+                p.structname.clear();
+            }
+            p.metadata.clear();   // FIXME?
+            p.validdefault = (p.data != NULL);
+        }
+    }
+
+    m_meta.clear();   // no metadata available at this point
+
+    return false;
+}
+
+
+
+#define USTR(cstr) (*((ustring *)&cstr))
+#define TYPEDESC(x) (*(TypeDesc *)&x)
+#define MAT(m) (*(Matrix44 *)m)
+
+OSL_SHADEOP int
+osl_get_matrix (void *sg_, void *r, const char *from)
+{
+    ShaderGlobals *sg = (ShaderGlobals *)sg_;
+    ShadingContext *ctx = (ShadingContext *)sg->context;
+    if (USTR(from) == Strings::common ||
+            USTR(from) == ctx->shadingsys().commonspace_synonym()) {
+        MAT(r).makeIdentity ();
+        return true;
+    }
+    if (USTR(from) == Strings::shader) {
+        ctx->renderer()->get_matrix (sg, MAT(r), sg->shader2common, sg->time);
+        return true;
+    }
+    if (USTR(from) == Strings::object) {
+        ctx->renderer()->get_matrix (sg, MAT(r), sg->object2common, sg->time);
+        return true;
+    }
+    int ok = ctx->renderer()->get_matrix (sg, MAT(r), USTR(from), sg->time);
+    if (! ok) {
+        MAT(r).makeIdentity();
+        ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
+        if (ctx->shadingsys().unknown_coordsys_error())
+            ctx->error ("Unknown transformation \"%s\"", from);
+    }
+    return ok;
+}
+
+
+OSL_SHADEOP int
+osl_get_inverse_matrix (void *sg_, void *r, const char *to)
+{
+    ShaderGlobals *sg = (ShaderGlobals *)sg_;
+    ShadingContext *ctx = (ShadingContext *)sg->context;
+    if (USTR(to) == Strings::common ||
+            USTR(to) == ctx->shadingsys().commonspace_synonym()) {
+        MAT(r).makeIdentity ();
+        return true;
+    }
+    if (USTR(to) == Strings::shader) {
+        ctx->renderer()->get_inverse_matrix (sg, MAT(r), sg->shader2common, sg->time);
+        return true;
+    }
+    if (USTR(to) == Strings::object) {
+        ctx->renderer()->get_inverse_matrix (sg, MAT(r), sg->object2common, sg->time);
+        return true;
+    }
+    int ok = ctx->renderer()->get_inverse_matrix (sg, MAT(r), USTR(to), sg->time);
+    if (! ok) {
+        MAT(r).makeIdentity ();
+        ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
+        if (ctx->shadingsys().unknown_coordsys_error())
+            ctx->error ("Unknown transformation \"%s\"", to);
+    }
+    return ok;
+}
+
+
+OSL_SHADEOP int
+osl_prepend_matrix_from (void *sg, void *r, const char *from)
+{
+    Matrix44 m;
+    bool ok = osl_get_matrix ((ShaderGlobals *)sg, &m, from);
+    if (ok)
+        MAT(r) = m * MAT(r);
+    else {
+        ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
+        if (ctx->shadingsys().unknown_coordsys_error())
+            ctx->error ("Unknown transformation \"%s\"", from);
+    }
+    return ok;
+}
+
+
+
+// vals points to a symbol with a total of ncomps floats (ncomps ==
+// aggregate*arraylen).  If has_derivs is true, it's actually 3 times
+// that length, the main values then the derivatives.  We want to check
+// for nans in vals[firstcheck..firstcheck+nchecks-1], and also in the
+// derivatives if present.  Note that if firstcheck==0 and nchecks==ncomps,
+// we are checking the entire contents of the symbol.  More restrictive
+// firstcheck,nchecks are used to check just one element of an array.
+OSL_SHADEOP void
+osl_naninf_check (int ncomps, const void *vals_, int has_derivs,
+                  void *sg, const void *sourcefile, int sourceline,
+                  void *symbolname, int firstcheck, int nchecks,
+                  const void *opname)
+{
+    ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
+    const float *vals = (const float *)vals_;
+    for (int d = 0;  d < (has_derivs ? 3 : 1);  ++d) {
+        for (int c = firstcheck, e = c+nchecks; c < e;  ++c) {
+            int i = d*ncomps + c;
+            if (! OIIO::isfinite(vals[i])) {
+                ctx->error ("Detected %g value in %s%s at %s:%d (op %s)",
+                            vals[i], d > 0 ? "the derivatives of " : "",
+                            USTR(symbolname), USTR(sourcefile), sourceline,
+                            USTR(opname));
+                return;
+            }
+        }
+    }
+}
+
+
+
+// vals points to the data of a float-, int-, or string-based symbol.
+// (described by typedesc).  We want to check
+// vals[firstcheck..firstcheck+nchecks-1] for floats that are NaN , or
+// ints that are -MAXINT, or strings that are "!!!uninitialized!!!"
+// which would indicate that the value is uninitialized if
+// 'debug_uninit' is turned on.  Note that if firstcheck==0 and
+// nchecks==ncomps, we are checking the entire contents of the symbol.
+// More restrictive firstcheck,nchecks are used to check just one
+// element of an array.
+OSL_SHADEOP void
+osl_uninit_check (long long typedesc_, void *vals_,
+                  void *sg, const void *sourcefile, int sourceline,
+                  void *symbolname, int firstcheck, int nchecks)
+{
+    TypeDesc typedesc = TYPEDESC(typedesc_);
+    ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
+    bool uninit = false;
+    if (typedesc.basetype == TypeDesc::FLOAT) {
+        float *vals = (float *)vals_;
+        for (int c = firstcheck, e = firstcheck+nchecks; c < e;  ++c)
+            if (!OIIO::isfinite(vals[c])) {
+                uninit = true;
+                vals[c] = 0;
+            }
+    }
+    if (typedesc.basetype == TypeDesc::INT) {
+        int *vals = (int *)vals_;
+        for (int c = firstcheck, e = firstcheck+nchecks; c < e;  ++c)
+            if (vals[c] == std::numeric_limits<int>::min()) {
+                uninit = true;
+                vals[c] = 0;
+            }
+    }
+    if (typedesc.basetype == TypeDesc::STRING) {
+        ustring *vals = (ustring *)vals_;
+        for (int c = firstcheck, e = firstcheck+nchecks; c < e;  ++c)
+            if (vals[c] == Strings::uninitialized_string) {
+                uninit = true;
+                vals[c] = ustring();
+            }
+    }
+    if (uninit) {
+        ctx->error ("Detected possible use of uninitialized value in %s at %s:%d",
+                    USTR(symbolname), USTR(sourcefile), sourceline);
+    }
+}
+
+
+
+OSL_SHADEOP int
+osl_range_check (int indexvalue, int length,
+                 void *sg, const void *sourcefile, int sourceline)
+{
+    if (indexvalue < 0 || indexvalue >= length) {
+        ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
+        ctx->error ("Index [%d] out of range [0..%d]: %s:%d",
+                    indexvalue, length-1, USTR(sourcefile), sourceline);
+        if (indexvalue >= length)
+            indexvalue = length-1;
+        else
+            indexvalue = 0;
+    }
+    return indexvalue;
+}
+
+
+
+// Asked if the raytype is a name we can't know until mid-shader.
+OSL_SHADEOP int osl_raytype_name (void *sg_, void *name)
+{
+    ShaderGlobals *sg = (ShaderGlobals *)sg_;
+    int bit = sg->context->shadingsys().raytype_bit (USTR(name));
+    return (sg->raytype & bit) != 0;
+}
+
+
+OSL_SHADEOP int osl_get_attribute(void *sg_,
+                             int   dest_derivs,
+                             void *obj_name_,
+                             void *attr_name_,
+                             int   array_lookup,
+                             int   index,
+                             const void *attr_type,
+                             void *attr_dest)
+{
+    ShaderGlobals *sg   = (ShaderGlobals *)sg_;
+    const ustring &obj_name  = USTR(obj_name_);
+    const ustring &attr_name = USTR(attr_name_);
+
+    return sg->context->osl_get_attribute (sg, sg->objdata,
+                                           dest_derivs, obj_name, attr_name,
+                                           array_lookup, index,
+                                           *(const TypeDesc *)attr_type,
+                                           attr_dest);
+}
+
+
 
 
 #ifndef OSL_STATIC_LIBRARY

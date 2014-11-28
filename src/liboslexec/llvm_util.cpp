@@ -29,9 +29,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <OpenImageIO/thread.h>
 
-#include "oslconfig.h"
-#include "llvm_util.h"
+#include "OSL/oslconfig.h"
+#include "OSL/llvm_util.h"
 
+#ifndef USE_MCJIT
+#define USE_MCJIT 0
+#endif
 
 #if OSL_LLVM_VERSION >= 33
 
@@ -43,7 +46,19 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 # include <llvm/IR/LLVMContext.h>
 # include <llvm/IR/IRBuilder.h>
 # include <llvm/IR/DataLayout.h>
+# if OSL_LLVM_VERSION >= 35
+# include <llvm/Linker/Linker.h>
+# include <llvm/Support/FileSystem.h>
+# include <llvm/Support/ErrorOr.h>
+# else
 # include <llvm/Linker.h>
+# endif
+# if OSL_LLVM_VERSION >= 34
+#   include <llvm/IR/LegacyPassManager.h>
+# else
+#   include <llvm/PassManager.h>
+# endif
+# include <llvm/Support/TargetRegistry.h>
 
 #else /* older releases */
 
@@ -61,20 +76,29 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #   include <llvm/Support/IRBuilder.h>
 #   include <llvm/Target/TargetData.h>
 # endif
+# include <llvm/PassManager.h>
 
 #endif
 
 #include <llvm/Bitcode/ReaderWriter.h>
 #include <llvm/Support/ManagedStatic.h>
 #include <llvm/Support/MemoryBuffer.h>
-#include <llvm/PassManager.h>
 #include <llvm/ExecutionEngine/GenericValue.h>
-#include <llvm/ExecutionEngine/JIT.h>
+#if USE_MCJIT
+# include <llvm/ExecutionEngine/MCJIT.h>
+# include <llvm/ExecutionEngine/JIT.h>
+#else
+# include <llvm/ExecutionEngine/JIT.h>
+#endif
 #include <llvm/ExecutionEngine/JITMemoryManager.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/PrettyStackTrace.h>
+#if OSL_LLVM_VERSION >= 35
+#include <llvm/IR/Verifier.h>
+#else
 #include <llvm/Analysis/Verifier.h>
+#endif
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/IPO.h>
@@ -175,6 +199,7 @@ public:
     virtual void deallocateFunctionBody(void *Body) {
         // DON'T DEALLOCATE mm->deallocateFunctionBody (Body);
     }
+#if OSL_LLVM_VERSION <= 33
     virtual uint8_t* startExceptionTable(const llvm::Function* F,
                                          uintptr_t &ActualSize) {
         return mm->startExceptionTable (F, ActualSize);
@@ -186,6 +211,7 @@ public:
     virtual void deallocateExceptionTable(void *ET) {
         // DON'T DEALLOCATE mm->deallocateExceptionTable(ET);
     }
+#endif
     virtual bool CheckInvariants(std::string &s) {
         return mm->CheckInvariants(s);
     }
@@ -201,7 +227,41 @@ public:
     virtual unsigned GetNumCodeSlabs() { return mm->GetNumCodeSlabs(); }
     virtual unsigned GetNumDataSlabs() { return mm->GetNumDataSlabs(); }
     virtual unsigned GetNumStubSlabs() { return mm->GetNumStubSlabs(); }
-#if OSL_LLVM_VERSION >= 31
+
+#if OSL_LLVM_VERSION >= 34
+
+    virtual void *getPointerToNamedFunction(const std::string &Name,
+                                            bool AbortOnFailure = true) {
+        return mm->getPointerToNamedFunction (Name, AbortOnFailure);
+    }
+    virtual uint8_t *allocateCodeSection(uintptr_t Size, unsigned Alignment,
+                             unsigned SectionID, llvm::StringRef SectionName) {
+        return mm->allocateCodeSection(Size, Alignment, SectionID, SectionName);
+    }
+    virtual uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment,
+                             unsigned SectionID, llvm::StringRef SectionName,
+                             bool IsReadOnly) {
+        return mm->allocateDataSection(Size, Alignment, SectionID,
+                                       SectionName, IsReadOnly);
+    }
+    virtual void registerEHFrames(uint8_t *Addr, uint64_t LoadAddr, size_t Size) {
+        mm->registerEHFrames (Addr, LoadAddr, Size);
+    }
+    virtual void deregisterEHFrames(uint8_t *Addr, uint64_t LoadAddr, size_t Size) {
+        mm->deregisterEHFrames(Addr, LoadAddr, Size);
+    }
+    virtual uint64_t getSymbolAddress(const std::string &Name) {
+        return mm->getSymbolAddress (Name);
+    }
+    virtual void notifyObjectLoaded(llvm::ExecutionEngine *EE, const llvm::ObjectImage *oi) {
+        mm->notifyObjectLoaded (EE, oi);
+    }
+    virtual bool finalizeMemory(std::string *ErrMsg = 0) {
+        return mm->finalizeMemory (ErrMsg);
+    }
+
+#elif OSL_LLVM_VERSION == 33
+
     virtual void *getPointerToNamedFunction(const std::string &Name,
                                             bool AbortOnFailure = true) {
         return mm->getPointerToNamedFunction (Name, AbortOnFailure);
@@ -210,7 +270,6 @@ public:
                                          unsigned SectionID) {
         return mm->allocateCodeSection(Size, Alignment, SectionID);
     }
-#if OSL_LLVM_VERSION >= 33
     virtual uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment,
                                          unsigned SectionID, bool IsReadOnly) {
         return mm->allocateDataSection(Size, Alignment, SectionID, IsReadOnly);
@@ -218,23 +277,34 @@ public:
     virtual bool applyPermissions(std::string *ErrMsg = 0) {
         return mm->applyPermissions(ErrMsg);
     }
-#else
+
+#elif OSL_LLVM_VERSION == 32 || OSL_LLVM_VERSION == 31
+
+    virtual void *getPointerToNamedFunction(const std::string &Name,
+                                            bool AbortOnFailure = true) {
+        return mm->getPointerToNamedFunction (Name, AbortOnFailure);
+    }
+    virtual uint8_t *allocateCodeSection(uintptr_t Size, unsigned Alignment,
+                                         unsigned SectionID) {
+        return mm->allocateCodeSection(Size, Alignment, SectionID);
+    }
     virtual uint8_t *allocateDataSection(uintptr_t Size, unsigned Alignment,
                                          unsigned SectionID) {
         return mm->allocateDataSection(Size, Alignment, SectionID);
     }
-#endif
+
 #endif
 };
 
 
 
 
-LLVM_Util::LLVM_Util ()
-    : m_thread(NULL), m_llvm_context(NULL), m_llvm_module(NULL),
+LLVM_Util::LLVM_Util (int debuglevel)
+    : m_debug(debuglevel), m_thread(NULL),
+      m_llvm_context(NULL), m_llvm_module(NULL),
       m_builder(NULL), m_llvm_jitmm(NULL),
       m_current_function(NULL),
-      m_llvm_passes(NULL), m_llvm_func_passes(NULL),
+      m_llvm_module_passes(NULL), m_llvm_func_passes(NULL),
       m_llvm_exec(NULL)
 {
     SetupLLVM ();
@@ -289,7 +359,7 @@ LLVM_Util::LLVM_Util ()
 LLVM_Util::~LLVM_Util ()
 {
     execengine (NULL);
-    delete m_llvm_passes;
+    delete m_llvm_module_passes;
     delete m_llvm_func_passes;
     delete m_builder;
     module (NULL);
@@ -306,10 +376,39 @@ LLVM_Util::SetupLLVM ()
         return;
     // Some global LLVM initialization for the first thread that
     // gets here.
-    // info ("Setting up LLVM");
+
+#if OSL_LLVM_VERSION <= 33
+    // Starting with LLVM 3.4, the pretty stack trace was opt-in rather
+    // than opt-out, and the following variable was removed.
     llvm::DisablePrettyStackTrace = true;
-    llvm::llvm_start_multithreaded ();  // enable it to be thread-safe
+#endif
+
+#if OSL_LLVM_VERSION < 35
+    // enable it to be thread-safe
+    llvm::llvm_start_multithreaded ();
+#endif
+// new versions (>=3.5)don't need this anymore
+
+#if USE_MCJIT
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmPrinters();
+    llvm::InitializeAllAsmParsers();
+    llvm::InitializeAllDisassemblers();
+#else
     llvm::InitializeNativeTarget();
+#endif
+
+    if (debug()) {
+        for (llvm::TargetRegistry::iterator t = llvm::TargetRegistry::begin();
+             t != llvm::TargetRegistry::end();  ++t) {
+            std::cout << "Target: '" << t->getName() << "' "
+                      << t->getShortDescription() << "\n";
+        }
+        std::cout << "\n";
+    }
+
     setup_done = true;
 }
 
@@ -325,20 +424,34 @@ LLVM_Util::new_module (const char *id)
 
 llvm::Module *
 LLVM_Util::module_from_bitcode (const char *bitcode, size_t size,
-                                std::string *err)
+                                const std::string &name, std::string *err)
 {
     if (err)
         err->clear();
+    llvm::MemoryBuffer* buf =
+        llvm::MemoryBuffer::getMemBuffer (llvm::StringRef(bitcode, size), name);
+
     // Load the LLVM bitcode and parse it into a Module
-    llvm::MemoryBuffer* buf = llvm::MemoryBuffer::getMemBuffer (llvm::StringRef(bitcode, size));
-    // Load the LLVM bitcode and parse it into a Module
-#if 0 /* Parse the whole thing now */
-    llvm::Module *m = llvm::ParseBitcodeFile (buf, context(), &err);
+#if USE_MCJIT /* Parse the whole thing now */
+    // FIXME!! Using MCJIT should not require unconditionally parsing the
+    // bitcode. But for now, when using getLazyBitcodeModule to lazily
+    // deserialize the bitcode, MCJIT is unable to find the called functions
+    // due to disagreement about whether a leading "_" is part of the symbol
+    // name.
+    llvm::Module *m = llvm::ParseBitcodeFile (buf, context(), err);
     delete buf;
-#else /* Create a lazily deserialized IR module */
+#else
+    // Create a lazily deserialized IR module
+# if OSL_LLVM_VERSION >= 35
+    llvm::Module *m = llvm::getLazyBitcodeModule (buf, context()).get();
+# else
     llvm::Module *m = llvm::getLazyBitcodeModule (buf, context(), err);
     // don't delete buf, the module has taken ownership of it
+# endif
 #endif
+    // Debugging: print all functions in the module
+    // for (llvm::Module::iterator i = m->begin(); i != m->end(); ++i)
+    //     std::cout << "  found " << i->getName().data() << "\n";
     return m;
 }
 
@@ -370,9 +483,20 @@ LLVM_Util::make_jit_execengine (std::string *err)
     execengine (NULL);   // delete and clear any existing engine
     if (err)
         err->clear ();
+#if OSL_LLVM_VERSION >= 33
+    m_llvm_exec = llvm::EngineBuilder(module())
+                            .setEngineKind(llvm::EngineKind::JIT)
+                            .setErrorStr(err)
+                            .setJITMemoryManager(jitmm())
+                            .setOptLevel(llvm::CodeGenOpt::Default)
+                            .setUseMCJIT(USE_MCJIT)
+                            .create();
+#else
     m_llvm_exec = llvm::ExecutionEngine::createJIT (module(), err,
                                     jitmm(), llvm::CodeGenOpt::Default,
                                     /*AllocateGVsWithCode*/ false);
+#endif
+
     // N.B. createJIT will take ownership of the the JITMemoryManager!
 
     if (! m_llvm_exec)
@@ -400,7 +524,23 @@ LLVM_Util::execengine (llvm::ExecutionEngine *exec)
 void *
 LLVM_Util::getPointerToFunction (llvm::Function *func)
 {
-    return execengine()->getPointerToFunction (func);
+    llvm::ExecutionEngine *exec = execengine();
+#if OSL_LLVM_VERSION >= 33
+    if (USE_MCJIT)
+        exec->finalizeObject ();
+#endif
+    void *f = exec->getPointerToFunction (func);
+    ASSERT (f && "could not getPointerToFunction");
+    return f;
+}
+
+
+
+void
+LLVM_Util::InstallLazyFunctionCreator (void* (*P)(const std::string &))
+{
+    llvm::ExecutionEngine *exec = execengine();
+    exec->InstallLazyFunctionCreator (P);
 }
 
 
@@ -408,29 +548,50 @@ LLVM_Util::getPointerToFunction (llvm::Function *func)
 void
 LLVM_Util::setup_optimization_passes (int optlevel)
 {
-    ASSERT (m_llvm_passes == NULL && m_llvm_func_passes == NULL);
+    ASSERT (m_llvm_module_passes == NULL && m_llvm_func_passes == NULL);
 
     // Specify per-function passes
     //
+#if OSL_LLVM_VERSION >= 34
+    m_llvm_func_passes = new llvm::legacy::FunctionPassManager(module());
+    llvm::legacy::FunctionPassManager &fpm (*m_llvm_func_passes);
+# if OSL_LLVM_VERSION >= 35
+    fpm.add (new llvm::DataLayoutPass(module()));
+# else
+    fpm.add (new llvm::DataLayout(module()));
+# endif
+#else
     m_llvm_func_passes = new llvm::FunctionPassManager(module());
     llvm::FunctionPassManager &fpm (*m_llvm_func_passes);
-#if OSL_LLVM_VERSION >= 32
+# if OSL_LLVM_VERSION >= 32
     fpm.add (new llvm::DataLayout(module()));
-#else
+# else
     fpm.add (new llvm::TargetData(module()));
+# endif
 #endif
 
     // Specify module-wide (interprocedural optimization) passes
     //
-    m_llvm_passes = new llvm::PassManager;
-    llvm::PassManager &passes (*m_llvm_passes);
-#if OSL_LLVM_VERSION >= 32
-    passes.add (new llvm::DataLayout(module()));
+#if OSL_LLVM_VERSION >= 34
+    m_llvm_module_passes = new llvm::legacy::PassManager;
+    llvm::legacy::PassManager &mpm (*m_llvm_module_passes);
+# if OSL_LLVM_VERSION >= 35
+    mpm.add (new llvm::DataLayoutPass(module()));
+# else
+    mpm.add (new llvm::DataLayout(module()));
+# endif
 #else
-    passes.add (new llvm::TargetData(module()));
+    m_llvm_module_passes = new llvm::PassManager;
+    llvm::PassManager &mpm (*m_llvm_module_passes);
+#if OSL_LLVM_VERSION >= 32
+    mpm.add (new llvm::DataLayout(module()));
+#else
+    mpm.add (new llvm::TargetData(module()));
+#endif
 #endif
 
     if (optlevel >= 1 && optlevel <= 3) {
+#if OSL_LLVM_VERSION <= 34
         // For LLVM 3.0 and higher, llvm_optimize 1-3 means to use the
         // same set of optimizations as clang -O1, -O2, -O3
         llvm::PassManagerBuilder builder;
@@ -438,42 +599,40 @@ LLVM_Util::setup_optimization_passes (int optlevel)
         builder.Inliner = llvm::createFunctionInliningPass();
         // builder.DisableUnrollLoops = true;
         builder.populateFunctionPassManager (fpm);
-        builder.populateModulePassManager (passes);
-        // Skip this for now, investigate later.  FIXME.
-        //    builder.populateLTOPassManager (passes, true /* internalize */,
-        //                                    true /* inline once again */);
-        builder.populateModulePassManager (passes);
+        builder.populateModulePassManager (mpm);
+#endif
+
     } else {
         // LLVM 2.x, or unknown choices for llvm_optimize: use the same basic
         // set of passes that we always have.
 
         // Always add verifier?
-        passes.add (llvm::createVerifierPass());
+        mpm.add (llvm::createVerifierPass());
         // Simplify the call graph if possible (deleting unreachable blocks, etc.)
-        passes.add (llvm::createCFGSimplificationPass());
+        mpm.add (llvm::createCFGSimplificationPass());
         // Change memory references to registers
-        //  passes.add (llvm::createPromoteMemoryToRegisterPass());
-        passes.add (llvm::createScalarReplAggregatesPass());
+        //  mpm.add (llvm::createPromoteMemoryToRegisterPass());
+        mpm.add (llvm::createScalarReplAggregatesPass());
         // Combine instructions where possible -- peephole opts & bit-twiddling
-        passes.add (llvm::createInstructionCombiningPass());
+        mpm.add (llvm::createInstructionCombiningPass());
         // Inline small functions
-        passes.add (llvm::createFunctionInliningPass());  // 250?
+        mpm.add (llvm::createFunctionInliningPass());  // 250?
         // Eliminate early returns
-        passes.add (llvm::createUnifyFunctionExitNodesPass());
+        mpm.add (llvm::createUnifyFunctionExitNodesPass());
         // resassociate exprssions (a = x + (3 + y) -> a = x + y + 3)
-        passes.add (llvm::createReassociatePass());
+        mpm.add (llvm::createReassociatePass());
         // Eliminate common sub-expressions
-        passes.add (llvm::createGVNPass());
+        mpm.add (llvm::createGVNPass());
         // Constant propagation with SCCP
-        passes.add (llvm::createSCCPPass());
+        mpm.add (llvm::createSCCPPass());
         // More dead code elimination
-        passes.add (llvm::createAggressiveDCEPass());
+        mpm.add (llvm::createAggressiveDCEPass());
         // Combine instructions where possible -- peephole opts & bit-twiddling
-        passes.add (llvm::createInstructionCombiningPass());
+        mpm.add (llvm::createInstructionCombiningPass());
         // Simplify the call graph if possible (deleting unreachable blocks, etc.)
-        passes.add (llvm::createCFGSimplificationPass());
+        mpm.add (llvm::createCFGSimplificationPass());
         // Try to make stuff into registers one last time.
-        passes.add (llvm::createPromoteMemoryToRegisterPass());
+        mpm.add (llvm::createPromoteMemoryToRegisterPass());
     }
 }
 
@@ -482,7 +641,11 @@ LLVM_Util::setup_optimization_passes (int optlevel)
 void
 LLVM_Util::do_optimize ()
 {
-    m_llvm_passes->run (*module());
+#if OSL_LLVM_VERSION >= 34
+    m_llvm_module_passes->run (*module());
+#else
+    m_llvm_module_passes->run (*module());
+#endif
 }
 
 
@@ -512,8 +675,11 @@ LLVM_Util::make_function (const std::string &name, bool fastcall,
                           bool varargs)
 {
     llvm::FunctionType *functype = type_function (rettype, params, varargs);
-    llvm::Function *func = llvm::cast<llvm::Function>(
-        module()->getOrInsertFunction (name, functype));
+    llvm::Constant *c = module()->getOrInsertFunction (name, functype);
+    ASSERT (c && "getOrInsertFunction returned NULL");
+    ASSERT_MSG (llvm::isa<llvm::Function>(c),
+                "Declaration for %s is wrong, LLVM had to make a cast", name.c_str());
+    llvm::Function *func = llvm::cast<llvm::Function>(c);
     if (fastcall)
         func->setCallingConv(llvm::CallingConv::Fast);
     return func;
@@ -616,16 +782,34 @@ LLVM_Util::type_union(const std::vector<llvm::Type *> &types)
 #else
     llvm::TargetData target(module());
 #endif
-    size_t max_size = 0;
-    size_t max_align = 1;
-    for (size_t i = 0; i < types.size(); ++i) {
-        size_t size = target.getTypeStoreSize(types[i]);
-        size_t align = target.getABITypeAlignment(types[i]);
-        max_size  = size  > max_size  ? size  : max_size;
-        max_align = align > max_align ? align : max_align;
+#endif
+};
+
+
+
+
+LLVM_Util::LLVM_Util ()
+    : m_thread(NULL), m_llvm_context(NULL), m_llvm_module(NULL),
+      m_builder(NULL), m_llvm_jitmm(NULL),
+      m_current_function(NULL),
+      m_llvm_passes(NULL), m_llvm_func_passes(NULL),
+      m_llvm_exec(NULL)
+{
+    SetupLLVM ();
+    m_thread = PerThreadInfo::get();
+    ASSERT (m_thread);
+
+    {
+        OIIO::spin_lock lock (llvm_global_mutex);
+        if (! m_thread->llvm_context)
+            m_thread->llvm_context = new llvm::LLVMContext();
+
+        if (! m_thread->llvm_jitmm) {
+            m_thread->llvm_jitmm = llvm::JITMemoryManager::CreateDefaultMemManager();
+            ASSERT (m_thread->llvm_jitmm);
+            jitmm_hold.push_back (shared_ptr<llvm::JITMemoryManager>(m_thread->llvm_jitmm));
+        }
     }
-    size_t padding = (max_size % max_align) ? max_align - (max_size % max_align) : 0;
-    size_t union_size = max_size + padding;
 
     llvm::Type * base_type = NULL;
     // to ensure the alignment when included in a struct use
@@ -639,8 +823,32 @@ LLVM_Util::type_union(const std::vector<llvm::Type *> &types)
     else
         base_type = (llvm::Type *) llvm::Type::getInt8Ty (context());
 
-    size_t array_len = union_size / target.getTypeStoreSize(base_type);
-    return (llvm::Type *) llvm::ArrayType::get (base_type, array_len);
+    // Set up aliases for types we use over and over
+    m_llvm_type_float = (llvm::Type *) llvm::Type::getFloatTy (*m_llvm_context);
+    m_llvm_type_int = (llvm::Type *) llvm::Type::getInt32Ty (*m_llvm_context);
+    if (sizeof(char *) == 4)
+        m_llvm_type_addrint = (llvm::Type *) llvm::Type::getInt32Ty (*m_llvm_context);
+    else
+        m_llvm_type_addrint = (llvm::Type *) llvm::Type::getInt64Ty (*m_llvm_context);
+    m_llvm_type_int_ptr = (llvm::PointerType *) llvm::Type::getInt32PtrTy (*m_llvm_context);
+    m_llvm_type_bool = (llvm::Type *) llvm::Type::getInt1Ty (*m_llvm_context);
+    m_llvm_type_char = (llvm::Type *) llvm::Type::getInt8Ty (*m_llvm_context);
+    m_llvm_type_longlong = (llvm::Type *) llvm::Type::getInt64Ty (*m_llvm_context);
+    m_llvm_type_void = (llvm::Type *) llvm::Type::getVoidTy (*m_llvm_context);
+    m_llvm_type_char_ptr = (llvm::PointerType *) llvm::Type::getInt8PtrTy (*m_llvm_context);
+    m_llvm_type_float_ptr = (llvm::PointerType *) llvm::Type::getFloatPtrTy (*m_llvm_context);
+    m_llvm_type_ustring_ptr = (llvm::PointerType *) llvm::PointerType::get (m_llvm_type_char_ptr, 0);
+    m_llvm_type_void_ptr = m_llvm_type_char_ptr;
+
+    // A triple is a struct composed of 3 floats
+    std::vector<llvm::Type*> triplefields(3, m_llvm_type_float);
+    m_llvm_type_triple = type_struct (triplefields, "Vec3");
+    m_llvm_type_triple_ptr = (llvm::PointerType *) llvm::PointerType::get (m_llvm_type_triple, 0);
+
+    // A matrix is a struct composed 16 floats
+    std::vector<llvm::Type*> matrixfields(16, m_llvm_type_float);
+    m_llvm_type_matrix = type_struct (matrixfields, "Matrix4");
+    m_llvm_type_matrix_ptr = (llvm::PointerType *) llvm::PointerType::get (m_llvm_type_matrix, 0);
 }
 
 
@@ -687,6 +895,33 @@ LLVM_Util::type_function_ptr (llvm::Type *rettype,
 {
     llvm::FunctionType *functype = type_function (rettype, params, varargs);
     return llvm::PointerType::getUnqual (functype);
+}
+
+
+
+std::string
+LLVM_Util::llvm_typename (llvm::Type *type) const
+{
+    std::string s;
+    llvm::raw_string_ostream stream (s);
+    stream << (*type);
+    return stream.str();
+}
+
+
+
+llvm::Type *
+LLVM_Util::llvm_typeof (llvm::Value *val) const
+{
+    return val->getType();
+}
+
+
+
+std::string
+LLVM_Util::llvm_typenameof (llvm::Value *val) const
+{
+    return llvm_typename (llvm_typeof (val));
 }
 
 
@@ -910,20 +1145,20 @@ LLVM_Util::mark_fast_func_call (llvm::Value *funccall)
 
 
 void
-LLVM_Util::op_branch (llvm::BasicBlock *dest)
+LLVM_Util::op_branch (llvm::BasicBlock *block)
 {
-    builder().CreateBr (dest);
-    set_insert_point (dest);
+    builder().CreateBr (block);
+    set_insert_point (block);
 }
 
 
 
 void
-LLVM_Util::op_branch (llvm::Value *cond, llvm::BasicBlock *dest,
-                      llvm::BasicBlock *otherdest)
+LLVM_Util::op_branch (llvm::Value *cond, llvm::BasicBlock *trueblock,
+                      llvm::BasicBlock *falseblock)
 {
-    builder().CreateCondBr (cond, dest, otherdest);
-    set_insert_point (dest);
+    builder().CreateCondBr (cond, trueblock, falseblock);
+    set_insert_point (trueblock);
 }
 
 
@@ -1026,6 +1261,14 @@ llvm::Value *
 LLVM_Util::GEP (llvm::Value *ptr, llvm::Value *elem)
 {
     return builder().CreateGEP (ptr, elem);
+}
+
+
+
+llvm::Value *
+LLVM_Util::GEP (llvm::Value *ptr, int elem)
+{
+    return builder().CreateConstGEP1_32 (ptr, elem);
 }
 
 
@@ -1297,11 +1540,20 @@ void
 LLVM_Util::write_bitcode_file (const char *filename, std::string *err)
 {
     std::string local_error;
+#if OSL_LLVM_VERSION >= 35
+    llvm::raw_fd_ostream out (filename, err ? *err : local_error, llvm::sys::fs::F_None);
+#else
     llvm::raw_fd_ostream out (filename, err ? *err : local_error);
+#endif
     llvm::WriteBitcodeToFile (module(), out);
 }
 
 
+llvm::Value *
+LLVM_Util::op_or (llvm::Value *a, llvm::Value *b)
+{
+    return builder().CreateOr (a, b);
+}
 
 std::string
 LLVM_Util::bitcode_string (llvm::Function *func)

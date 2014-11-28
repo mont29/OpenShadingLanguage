@@ -30,15 +30,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <cmath>
 
 #include "oslexec_pvt.h"
-#include "genclosure.h"
+#include "OSL/genclosure.h"
 
 
 OSL_NAMESPACE_ENTER
 namespace pvt {
-
-// This symbol is strictly to force linkage of this file when building
-// static library.
-int opclosure_cpp_dummy = 1;
 
 
 

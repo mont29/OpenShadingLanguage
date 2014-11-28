@@ -31,73 +31,20 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string>
 #include <cstdio>
 
-#include "oslquery.h"
+#include "OSL/oslquery.h"
 #include "../liboslexec/osoreader.h"
 using namespace OSL;
 using namespace OSL::pvt;
 
-#include "OpenImageIO/filesystem.h"
+#include <OpenImageIO/filesystem.h>
+#include <OpenImageIO/strutil.h>
 namespace Filesystem = OIIO::Filesystem;
+namespace Strutil = OIIO::Strutil;
+using OIIO::string_view;
 
 
 OSL_NAMESPACE_ENTER
 namespace pvt {
-
-
-// ptr is a pointer to a char pointer.  Read chars from *ptr until you
-// hit the end of the string, or the next char is one of stop1 or stop2.
-// At that point, return what we hit, and also update *ptr to then point
-// to the next character following the stop character.
-static std::string
-readuntil (const char **ptr, char stop1, char stop2=-1)
-{
-    std::string s;
-    while (**ptr == ' ')
-        ++(*ptr);
-    while (**ptr && **ptr != stop1 && **ptr != stop2) {
-        s += (**ptr);
-        ++(*ptr);
-    }
-    if (**ptr == stop1 || **ptr == stop2)
-        ++(*ptr);
-    while (**ptr == ' ')
-        ++(*ptr);
-    return s;
-}
-
-
-
-static TypeDesc
-string_to_type (const char *s)
-{
-    TypeDesc t;
-    std::string tname = readuntil (&s, ' ');
-    if (tname == "int")
-        t = TypeDesc::TypeInt;
-    if (tname == "float")
-        t = TypeDesc::TypeFloat;
-    if (tname == "color")
-        t = TypeDesc::TypeColor;
-    if (tname == "point")
-        t = TypeDesc::TypePoint;
-    if (tname == "vector")
-        t = TypeDesc::TypeVector;
-    if (tname == "normal")
-        t = TypeDesc::TypeNormal;
-    if (tname == "matrix")
-        t = TypeDesc::TypeMatrix;
-    if (tname == "string")
-        t = TypeDesc::TypeString;
-    if (*s == '[') {
-        ++s;
-        if (*s == ']')
-            t.arraylen = -1;
-        else
-            t.arraylen = atoi (s);
-    }
-    return t;
-}
-
 
 
 // Custom subclass of OSOReader that just reads the .oso file and fills
@@ -114,6 +61,7 @@ public:
     virtual void symdefault (int def);
     virtual void symdefault (float def);
     virtual void symdefault (const char *def);
+    virtual void parameter_done ();
     virtual void hint (const char *hintstring);
     virtual void codemarker (const char *name);
     virtual bool parse_code_section () { return false; }
@@ -130,7 +78,7 @@ void
 OSOReaderQuery::shader (const char *shadertype, const char *name)
 {
     m_query.m_shadername = name;
-    m_query.m_shadertype = shadertype;
+    m_query.m_shadertypename = shadertype;
 }
 
 
@@ -187,7 +135,7 @@ OSOReaderQuery::symdefault (const char *def)
 {
     if (m_reading_param && m_query.nparams() > 0) {
         OSLQuery::Parameter &p (m_query.m_params[m_query.nparams()-1]);
-        p.sdefault.push_back (std::string(def));
+        p.sdefault.push_back (ustring(def));
         p.validdefault = true;
     }
 }
@@ -195,51 +143,103 @@ OSOReaderQuery::symdefault (const char *def)
 
 
 void
-OSOReaderQuery::hint (const char *hintstring)
+OSOReaderQuery::parameter_done ()
 {
-    if (m_reading_param && ! strncmp (hintstring, "%meta{", 6)) {
-        hintstring += 6;
+    if (m_reading_param && m_query.nparams() > 0) {
+       // Make sure all value defaults have the right number of elements in
+       // case they were only partially initialized.
+       OSLQuery::Parameter &p (m_query.m_params.back());
+       int nvalues = p.type.numelements() * p.type.aggregate;
+       if (p.type.basetype == TypeDesc::INT) {
+           p.idefault.resize (nvalues, 0);
+           p.data = &p.idefault[0];
+       }
+       else if (p.type.basetype == TypeDesc::FLOAT) {
+           p.fdefault.resize (nvalues, 0);
+           p.data = &p.fdefault[0];
+       }
+       else if (p.type.basetype == TypeDesc::STRING) {
+           p.sdefault.resize (nvalues, ustring());
+           p.data = &p.sdefault[0];
+       }
+       if (p.spacename.size())
+           p.spacename.resize (p.type.numelements(), ustring());
+    }
+
+    m_reading_param = false;
+}
+
+
+
+void
+OSOReaderQuery::hint (const char *h)
+{
+    string_view hintstring (h);
+    if (! Strutil::parse_char (hintstring, '%'))
+        return;
+    if (m_reading_param && Strutil::parse_prefix(hintstring, "meta{")) {
         // std::cerr << "  Metadata '" << hintstring << "'\n";
-        std::string type = readuntil (&hintstring, ',', '}');
-        std::string name = readuntil (&hintstring, ',', '}');
+        Strutil::skip_whitespace (hintstring);
+        std::string type = Strutil::parse_until (hintstring, ",}");
+        Strutil::parse_char (hintstring, ',');
+        std::string name = Strutil::parse_until (hintstring, ",}");
+        Strutil::parse_char (hintstring, ',');
         // std::cerr << "    " << name << " : " << type << "\n";
         OSLQuery::Parameter p;
         p.name = name;
-        p.type = string_to_type (type.c_str());
+        p.type = TypeDesc (type.c_str());
         if (p.type.basetype == TypeDesc::STRING) {
-            while (*hintstring == ' ')
-                ++hintstring;
-            while (hintstring[0] == '\"') {
-                ++hintstring;
-                p.sdefault.push_back (readuntil (&hintstring, '\"'));
+            string_view val;
+            while (Strutil::parse_string (hintstring, val)) {
+                p.sdefault.push_back (ustring(val));
+                if (Strutil::parse_char (hintstring, '}'))
+                    break;
+                Strutil::parse_char (hintstring, ',');
             }
         } else if (p.type.basetype == TypeDesc::INT) {
-            while (*hintstring == ' ')
-                ++hintstring;
-            while (*hintstring && *hintstring != '}') {
-                p.idefault.push_back (atoi (hintstring));
-                readuntil (&hintstring, ',', '}');
+            int val;
+            while (Strutil::parse_int (hintstring, val)) {
+                p.idefault.push_back (val);
+                Strutil::parse_char (hintstring, ',');
             }
         } else if (p.type.basetype == TypeDesc::FLOAT) {
-            while (*hintstring == ' ')
-                ++hintstring;
-            while (*hintstring && *hintstring != '}') {
-                p.fdefault.push_back (atof (hintstring));
-                readuntil (&hintstring, ',', '}');
+            float val;
+            while (Strutil::parse_float (hintstring, val)) {
+                p.fdefault.push_back (val);
+                Strutil::parse_char (hintstring, ',');
             }
         }
+        Strutil::parse_char (hintstring, '}');
         m_query.m_params[m_query.nparams()-1].metadata.push_back (p);
         return;
     }
-    if (m_reading_param && ! strncmp (hintstring, "%structfields{", 14)) {
-        hintstring += 14;
+    if (m_reading_param && Strutil::parse_prefix(hintstring, "structfields{")) {
         OSLQuery::Parameter &param (m_query.m_params[m_query.nparams()-1]);
-        while (*hintstring) {
-            std::string afield = readuntil (&hintstring, ',', '}');
-            param.fields.push_back (afield);
+        string_view ident;
+        while (1) {
+            string_view ident = Strutil::parse_identifier (hintstring);
+            if (ident.length()) {
+                param.fields.push_back (ustring(ident));
+                Strutil::parse_char (hintstring, ',');
+            } else {
+                break;
+            }
         }
+        Strutil::parse_char (hintstring, '}');
         return;
     }
+    if (m_reading_param && Strutil::parse_prefix(hintstring, "struct{")) {
+        string_view str;
+        Strutil::parse_string (hintstring, str);
+        m_query.m_params[m_query.nparams()-1].structname = str;
+        Strutil::parse_char (hintstring, '}');
+        return;
+    }
+    if (m_reading_param && Strutil::parse_prefix(hintstring, "initexpr")) {
+        m_query.m_params[m_query.nparams()-1].validdefault = false;
+        return;
+    }
+
     // std::cerr << "Hint '" << hintstring << "'\n";
 }
 
@@ -270,8 +270,8 @@ OSLQuery::~OSLQuery ()
 
 
 bool
-OSLQuery::open (const std::string &shadername,
-                const std::string &searchpath)
+OSLQuery::open (string_view shadername,
+                string_view searchpath)
 {
     OSOReaderQuery oso (*this);
     std::string filename = shadername;
@@ -287,7 +287,7 @@ OSLQuery::open (const std::string &shadername,
         filename = Filesystem::searchpath_find (filename, dirs);
     }
     if (filename.empty()) {
-        m_error = std::string("File \"") + shadername + "\" could not be found";
+        error ("File \"%s\" could not be found.", shadername);
         return false;
     }
 

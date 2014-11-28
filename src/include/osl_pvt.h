@@ -28,12 +28,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
 
-#include "oslconfig.h"
+#include "OSL/oslconfig.h"
 
-#include "OpenImageIO/dassert.h"
-
-#include <boost/tr1/memory.hpp>
-using std::tr1::shared_ptr;
+#include <OpenImageIO/dassert.h>
 
 
 OSL_NAMESPACE_ENTER
@@ -54,11 +51,11 @@ enum ShaderType {
 
 /// Convert a ShaderType to a human-readable name ("surface", etc.)
 ///
-const char *shadertypename (ShaderType s);
+string_view shadertypename (ShaderType s);
 
 /// Convert a ShaderType to a human-readable name ("surface", etc.)
 ///
-ShaderType shadertype_from_name (const char *name);
+ShaderType shadertype_from_name (string_view name);
 
 
 
@@ -76,23 +73,7 @@ const char *shaderusename (ShaderUse s);
 
 /// Convert a ShaderUse to a human-readable name ("surface", etc.)
 ///
-ShaderUse shaderuse_from_name (const char *name);
-
-
-
-/// Data type for flags that indicate on a point-by-point basis whether
-/// we want computations to be performed.
-typedef unsigned char Runflag;
-
-/// Pre-defined values for Runflag's.
-///
-enum RunflagVal { RunflagOff = 0, RunflagOn = 1 };
-
-/// Data type for indices that indicate on which shading points we want
-/// computations to be performed.
-typedef int RunIndex;
-
-
+ShaderUse shaderuse_from_name (string_view name);
 
 
 
@@ -439,11 +420,14 @@ public:
 
     /// Number of fields in the struct.
     ///
-    size_t numfields () const { return m_fields.size(); }
+    int numfields () const { return (int)m_fields.size(); }
 
     /// Return a reference to an individual FieldSpec for one field
     /// of the struct, indexed numerically (starting with 0).
-    const FieldSpec & field (size_t i) const { return m_fields[i]; }
+    const FieldSpec & field (int i) const { return m_fields[i]; }
+
+    /// Look up the named field, return its index, or -1 if not found.
+    int lookup_field (ustring name) const;
 
 private:
     ustring m_name;                    ///< Structure name (unmangled)
@@ -463,7 +447,7 @@ public:
           m_name(name), m_typespec(datatype), m_symtype(symtype),
           m_has_derivs(false), m_const_initializer(false),
           m_connected_down(false),
-          m_initialized(false), m_lockgeom(false),
+          m_initialized(false), m_lockgeom(false), m_renderer_output(false),
           m_valuesource(DefaultVal), m_free_data(false), m_fieldid(-1),
           m_scope(0), m_dataoffset(-1),
           m_node(declaration_node), m_alias(NULL),
@@ -488,7 +472,7 @@ public:
 
     /// The symbol's (unmangled) name, guaranteed unique only within the
     /// symbol's declaration scope.
-    const ustring &name () const { return m_name; }
+    ustring name () const { return m_name; }
 
     /// The symbol's name, mangled to incorporate the scope so it will be
     /// a globally unique name.
@@ -646,6 +630,9 @@ public:
     bool lockgeom () const { return m_lockgeom; }
     void lockgeom (bool lock) { m_lockgeom = lock; }
 
+    bool renderer_output () const { return m_renderer_output; }
+    void renderer_output (bool v) { m_renderer_output = v; }
+
     bool is_constant () const { return symtype() == SymTypeConst; }
 
     /// Stream output
@@ -663,6 +650,7 @@ protected:
     unsigned m_connected_down:1;///< Connected to a later/downtream layer
     unsigned m_initialized:1;   ///< If a param, has it been initialized?
     unsigned m_lockgeom:1;      ///< Is the param not overridden by geom?
+    unsigned m_renderer_output:1; ///< Is this sym a renderer output?
     char m_valuesource;         ///< Where did the value come from?
     bool m_free_data;           ///< Free m_data upon destruction?
     short m_fieldid;            ///< Struct field of this var (or -1)
@@ -828,6 +816,9 @@ public:
     /// Return the entire argtakesderivs at once with a full bitfield.
     ///
     unsigned int argtakesderivs_all () const { return m_argtakesderivs; }
+
+    /// Replace the m_argtakesderivs entirely. Use with caution!
+    void argtakesderivs_all (unsigned int newval) { m_argtakesderivs = newval; }
 
     /// Are two opcodes identical enough to merge their instances?  Note
     /// that this isn't a true 'equal', we don't compare fields that

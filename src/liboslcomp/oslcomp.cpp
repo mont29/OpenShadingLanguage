@@ -40,11 +40,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "oslcomp_pvt.h"
 
-#include "OpenImageIO/strutil.h"
-#include "OpenImageIO/sysutil.h"
-#include "OpenImageIO/strutil.h"
-#include "OpenImageIO/dassert.h"
-#include "OpenImageIO/filesystem.h"
+#include <OpenImageIO/strutil.h>
+#include <OpenImageIO/sysutil.h>
+#include <OpenImageIO/strutil.h>
+#include <OpenImageIO/dassert.h>
+#include <OpenImageIO/filesystem.h>
 
 #include <boost/filesystem.hpp>
 #include <boost/foreach.hpp>
@@ -64,7 +64,39 @@ OSL_NAMESPACE_ENTER
 OSLCompiler *
 OSLCompiler::create ()
 {
-    return new pvt::OSLCompilerImpl;
+    return new OSLCompiler;
+}
+
+
+
+OSLCompiler::OSLCompiler ()
+    : m_impl(new pvt::OSLCompilerImpl)
+{
+}
+
+
+
+OSLCompiler::~OSLCompiler ()
+{
+    delete m_impl;
+}
+
+
+
+bool
+OSLCompiler::compile (string_view filename,
+                      const std::vector<string_view> &options,
+                      string_view stdoslpath)
+{
+    return m_impl->compile (filename, options, stdoslpath);
+}
+
+
+
+string_view
+OSLCompiler::output_filename () const
+{
+    return m_impl->output_filename();
 }
 
 
@@ -102,7 +134,7 @@ OSLCompilerImpl::~OSLCompilerImpl ()
 
 
 void
-OSLCompilerImpl::error (ustring filename, int line, const char *format, ...)
+OSLCompilerImpl::error (ustring filename, int line, const char *format, ...) const
 {
     va_list ap;
     va_start (ap, format);
@@ -120,7 +152,7 @@ OSLCompilerImpl::error (ustring filename, int line, const char *format, ...)
 
 
 void
-OSLCompilerImpl::warning (ustring filename, int line, const char *format, ...)
+OSLCompilerImpl::warning (ustring filename, int line, const char *format, ...) const
 {
     va_list ap;
     va_start (ap, format);
@@ -170,6 +202,11 @@ preprocess (const std::string &filename,
 
         // Setup wave context
         context_type ctx (instring.begin(), instring.end(), filename.c_str());
+
+        // Turn on support of variadic macros, e.g. #define FOO(...) __VA_ARGS__
+        boost::wave::language_support lang = boost::wave::language_support (
+                ctx.get_language() | boost::wave::support_option_variadics);
+        ctx.set_language (lang);
 
         for (size_t i = 0; i < defines.size(); ++i) {
             if (defines[i][1] == 'D')
@@ -296,9 +333,9 @@ preprocess (const std::string &filename,
 
 
 bool
-OSLCompilerImpl::compile (const std::string &filename,
-                          const std::vector<std::string> &options,
-                          const std::string &stdoslpath)
+OSLCompilerImpl::compile (string_view filename,
+                          const std::vector<string_view> &options,
+                          string_view stdoslpath)
 {
     if (! OIIO::Filesystem::exists (filename)) {
         error (ustring(), 0, "Input file \"%s\" not found", filename.c_str());
@@ -377,7 +414,7 @@ OSLCompilerImpl::compile (const std::string &filename,
         } else if (options[i].c_str()[0] == '-' && options[i].size() > 2) {
             // options meant for the preprocessor
             if (options[i].c_str()[1] == 'D' || options[i].c_str()[1] == 'U')
-                defines.push_back(options[i].substr(2));
+                defines.push_back(options[i]);
             else if (options[i].c_str()[1] == 'I')
                 includepaths.push_back(options[i].substr(2));
 #else
@@ -510,23 +547,16 @@ OSLCompilerImpl::write_oso_metadata (const ASTNode *metanode) const
     Symbol *metasym = metavar->sym();
     ASSERT (metasym);
     TypeSpec ts = metasym->typespec();
-    oso ("%%meta{%s,%s,", ts.string().c_str(), metasym->name().c_str());
-    const ASTNode *init = metavar->init().get();
-    ASSERT (init);
-    if (ts.is_string() && init->nodetype() == ASTNode::literal_node)
-        oso ("\"%s\"", ((const ASTliteral *)init)->strval());
-    else if (ts.is_int() && init->nodetype() == ASTNode::literal_node)
-        oso ("%d", ((const ASTliteral *)init)->intval());
-    else if (ts.is_float() && init->nodetype() == ASTNode::literal_node)
-        oso ("%.8g", ((const ASTliteral *)init)->floatval());
-    // FIXME -- what about type constructors?
-    else {
-        std::cout << "Error, don't know how to print metadata " 
-                  << ts.string() << " with node type " 
-                  << init->nodetypename() << "\n";
-        ASSERT (0);  // FIXME
+    std::string pdl;
+    bool ok = metavar->param_default_literals (metasym, pdl, ",");
+    if (ok) {
+        oso ("%%meta{%s,%s,%s} ", ts.string().c_str(), metasym->name(), pdl);
+    } else {
+        error (metanode->sourcefile(), metanode->sourceline(),
+               "Don't know how to print metadata %s (%s) with node type %s",
+               metasym->name().c_str(), ts.string().c_str(),
+               metavar->init()->nodetypename());
     }
-    oso ("} ");
 }
 
 
@@ -599,17 +629,14 @@ OSLCompilerImpl::write_oso_symbol (const Symbol *sym)
     }
 
     // %read and %write give the range of ops over which a symbol is used.
-    if (hints++ == 0)
-        oso ("\t");
-    oso (" %%read{%d,%d} %%write{%d,%d}", sym->firstread(), sym->lastread(),
+    oso ("%c%%read{%d,%d} %%write{%d,%d}", hints++ ? ' ' : '\t',
+         sym->firstread(), sym->lastread(),
          sym->firstwrite(), sym->lastwrite());
 
     // %struct, %structfields, and %structfieldtypes document the
     // definition of a structure and which other symbols comprise the
     // individual fields.
     if (sym->typespec().is_structure()) {
-        if (hints++ == 0)
-            oso ("\t");
         const StructSpec *structspec (sym->typespec().structspec());
         std::string fieldlist, signature;
         for (int i = 0;  i < (int)structspec->numfields();  ++i) {
@@ -618,27 +645,29 @@ OSLCompilerImpl::write_oso_symbol (const Symbol *sym)
             fieldlist += structspec->field(i).name.string();
             signature += code_from_type (structspec->field(i).type);
         }
-        oso (" %%struct{\"%s\"} %%structfields{%s} %%structfieldtypes{\"%s\"} %%structnfields{%d}",
+        oso ("%c%%struct{\"%s\"} %%structfields{%s} %%structfieldtypes{\"%s\"} %%structnfields{%d}",
+             hints++ ? ' ' : '\t',
              structspec->mangled().c_str(), fieldlist.c_str(),
              signature.c_str(), structspec->numfields());
     }
     // %mystruct and %mystructfield document the symbols holding structure
     // fields, linking them back to the structures they are part of.
     if (sym->fieldid() >= 0) {
-        if (hints++ == 0)
-            oso ("\t");
         ASTvariable_declaration *vd = (ASTvariable_declaration *) sym->node();
         if (vd)
-            oso (" %%mystruct{%s} %%mystructfield{%d}",
+            oso ("%c%%mystruct{%s} %%mystructfield{%d}", hints++ ? ' ' : '\t',
                  vd->sym()->mangled().c_str(), sym->fieldid());
     }
 
     // %derivs hint marks symbols that need to carry derivatives
-    if (sym->has_derivs()) {
-        if (hints++ == 0)
-            oso ("\t");
-        oso (" %%derivs");
-    }
+    if (sym->has_derivs())
+        oso ("%c%%derivs", hints++ ? ' ' : '\t');
+
+    // %initexpr hint marks parameters whose default is the result of code
+    // that must be executed (an expression, like =noise(P) or =u), rather
+    // than a true default value that is statically known (like =3.14).
+    if (isparam && sym->has_init_ops())
+        oso ("%c%%initexpr", hints++ ? ' ' : '\t');
 
 #if 0 // this is recomputed by the runtime optimizer, no need to bloat the .oso with these
 
@@ -817,19 +846,6 @@ OSLCompilerImpl::write_oso_file (const std::string &outfilename)
 
 
 
-void
-OSLCompilerImpl::oso (const char *fmt, ...) const
-{
-    // FIXME -- might be nice to let this save to a memory buffer, not
-    // just a file.
-    va_list arg_ptr;
-    va_start (arg_ptr, fmt);
-    vfprintf (m_osofile, fmt, arg_ptr);
-    va_end (arg_ptr);
-}
-
-
-
 std::string
 OSLCompilerImpl::retrieve_source (ustring filename, int line)
 {
@@ -967,9 +983,8 @@ OSLCompilerImpl::check_write_legality (const Opcode &op, int opnum,
     if (sym->symtype() == SymTypeParam && 
         (opnum < sym->initbegin() || opnum >= sym->initend())) {
         error (op.sourcefile(), op.sourceline(),
-               "Cannot write to input parameter '%s'",
-               sym->name().c_str());
-        error (op.sourcefile(), op.sourceline(), "  (op %d)", opnum);
+               "Cannot write to input parameter '%s' (op %d)",
+               sym->name().c_str(), opnum);
     }
 
     // FIXME -- check for writing to globals.  But it's tricky, depends on

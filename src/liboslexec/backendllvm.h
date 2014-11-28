@@ -36,7 +36,7 @@ using namespace OSL;
 using namespace OSL::pvt;
 
 #include "runtimeoptimize.h"
-#include "llvm_util.h"
+#include "OSL/llvm_util.h"
 
 
 
@@ -54,6 +54,8 @@ public:
                 ShadingContext *context);
 
     virtual ~BackendLLVM ();
+
+    virtual void set_inst (int layer);
 
     /// Create an llvm function for the whole shader group, JIT it,
     /// and store the llvm::Function* handle to it with the ShaderGroup.
@@ -200,11 +202,21 @@ public:
                               const std::string &name="");
 
     /// Given the OSL symbol, return the llvm::Value* corresponding to the
-    /// start of that symbol (first element, first component, and just the
-    /// plain value if it has derivatives).
+    /// address of the start of that symbol (first element, first component,
+    /// and just the plain value if it has derivatives).  This is retrieved
+    /// from the allocation map if already there; and if not yet in the
+    /// map, the symbol is alloca'd and placed in the map.
     llvm::Value *getOrAllocateLLVMSymbol (const Symbol& sym);
 
+    /// Retrieve an llvm::Value that is a pointer holding the start address
+    /// of the specified symbol. This always works for globals and params;
+    /// for stack variables (locals/temps) is succeeds only if the symbol is
+    /// already in the allocation table (will fail otherwise). This method
+    /// is not designed to retrieve constants.
     llvm::Value *getLLVMSymbolBase (const Symbol &sym);
+
+    /// Retrieve the named global ("P", "N", etc.).
+    llvm::Value *llvm_global_symbol_ptr (ustring name);
 
     /// Test whether val is nonzero, return the llvm::Value* that's the
     /// result of a CreateICmpNE or CreateFCmpUNE (depending on the
@@ -260,7 +272,7 @@ public:
     /// data that holds all the shader params.
     llvm::Type *llvm_type_groupdata_ptr ();
 
-    /// Return the ShaderGlobals pointer.
+    /// Return the group data pointer.
     ///
     llvm::Value *groupdata_ptr () const { return m_llvm_groupdata_ptr; }
 
@@ -270,9 +282,21 @@ public:
         return ll.void_ptr (m_llvm_groupdata_ptr);
     }
 
-    /// Return a ref to where the "layer_run" flag is stored for the
-    /// named layer.
-    llvm::Value *layer_run_ptr (int layer);
+    /// Return a reference to the specified field within the group data.
+    llvm::Value *groupdata_field_ref (int fieldnum);
+
+    /// Return a pointer to the specified field within the group data,
+    /// optionally cast to pointer to a particular data type.
+    llvm::Value *groupdata_field_ptr (int fieldnum,
+                                      TypeDesc type = TypeDesc::UNKNOWN);
+
+    /// Return a ref to the bool where the "layer_run" flag is stored for
+    /// the specified layer.
+    llvm::Value *layer_run_ref (int layer);
+
+    /// Return a ref to the bool where the "userdata_initialized" flag is
+    /// stored for the specified userdata index.
+    llvm::Value *userdata_initialized_ref (int userdata_index=0);
 
     /// Generate LLVM code to zero out the variable (including derivs)
     ///

@@ -43,7 +43,7 @@
 
 \def\langname{Open Shading Language\xspace}
 \def\product{{\sffamily Open Shading Language}\xspace}
-\def\versionnumber{1.5}
+\def\versionnumber{1.6}
 \def\productver{\product\ {\sffamily \versionnumber}\xspace}
 
 
@@ -55,14 +55,14 @@ Language Specification
 %\\ \large (CONFIDENTIAL --- draft in progress) 
 } \bigskip }
 \author{
-\copyright\ Copyright 2009-2013 Sony Pictures Imageworks Inc., et al. All rights reserved.
+\copyright\ Copyright 2009-2014 Sony Pictures Imageworks Inc., et al. All rights reserved.
  \bigskip \\
 \vspace{1in} \\
 Editor: Larry Gritz \\
 \emph{lg@imageworks.com}
 }
-\date{{\large Date: 12 Nov, 2013 \\
-~ (with corrections, 15 Nov 2013)
+\date{{\large Date: 14 Nov, 2014 \\
+%~ (with corrections, 2 Oct 2014)
 }
 \bigskip
 \bigskip
@@ -130,7 +130,7 @@ documentation are:
 
 \vspace*{0.2in}
 
-Copyright (c) 2009-2013 Sony Pictures Imageworks Inc., et al.
+Copyright (c) 2009-2014 Sony Pictures Imageworks Inc., et al.
 All Rights Reserved.
 
 \vspace{0.5in}
@@ -517,6 +517,26 @@ it might be done.}:
     ShaderGroupEnd ()
 \end{code}
 
+\noindent Or, expressed as serialized text (as detailed in
+Appendix~\ref{chap:serialize}):
+
+\begin{code}
+    param string name "rings.tx" ;
+    shader "texturemap" "tex1" ;
+    param string name "grain.tx" ;
+    shader "texturemap" "tex2" ;
+    param float gam 2.2 ;
+    shader "gamma" "gam1" ;
+    param float gam 1.0 ;
+    shader "gamma" "gam2" ;
+    shader "wood" "wood1" ;
+    connect tex1.Cout gam1.Cin ;
+    connect tex2.Cout gam2.Cin ;
+    connect gam1.Cout wood1.rings ;
+    connect gam2.Cout wood1.grain ;
+\end{code}
+
+
 
 \subsection*{Geometric primitives}
 
@@ -603,12 +623,12 @@ For example, a surface shader may compute its result like this:
 
 \begin{code}
     color paint = texture ("file.tx", u, v);
-    Ci = paint * lambert (N);
+    Ci = paint * diffuse (N);
 \end{code}
 
 \noindent In this example, the variable {\cf paint} will take on a
 specific numeric value (by looking up from a texture map).  But the {\cf
-  lambert()} function returns a \colorclosure, not a definite numeric
+  diffuse()} function returns a \colorclosure, not a definite numeric
 \color.  The output variable {\cf Ci} that represents the appearance of
 the surface is also a \colorclosure, whose numeric value is not known
 yet, except that it will be the product of {\cf paint} and a Lambertian
@@ -1108,8 +1128,9 @@ have an on/off checkbox, is intended to be a filename, etc.
 Metadata is specified inside double brackets {\cf [[} and {\cf ]]}
 enclosing a comma-separated list of metadata items.  Each metadatum
 looks like a parameter declaration --- having a data type, name, and
-initializer.  However, metadata may only be simple types (not arrays,
-structs, or closures) and their value initializers must be numeric or
+initializer.  However, metadata may only be simple types or arrays
+of simple types (not structs or closures)
+and their value initializers must be numeric or
 string constants (not computed expressions).
 
 Metadata about the shader as a whole is placed between the shader name
@@ -2878,16 +2899,16 @@ Absolute value of $x$.  (The two functions are synonyms.)
 Returns 1 if $x>0$, -1 if $x<0$, 0 if $x=0$.
 \apiend
 
-\apiitem{\emph{type} {\ce floor} (float x) \\
+\apiitem{\emph{type} {\ce floor} (\emph{type} x) \\
 \emph{type} {\ce ceil} (\emph{type} x) \\
 \emph{type} {\ce round} (\emph{type} x) \\
 \emph{type} {\ce trunc} (\emph{type} x) }
 \indexapi{floor()} \indexapi{ceil()} \indexapi{round()} \indexapi{trunc()}
 
-Various rouinding methods: {\cf floor} returns the highest integer less
-than or equal to $x$; {\cf ceil} returns the lowest integer greater than
+Various rouinding methods: {\cf floor} returns the largest integer less
+than or equal to $x$; {\cf ceil} returns the smallest integer greater than
 or equal to $x$; {\cf round} returns the closest integer to $x$, in
-either direction; and {\cf trunc} returns the integer part of $x$
+either direction; and {\cf trunc} returns the integral part of $x$
 (equivalent to {\cf floor} if $x>0$ and {\cf ceil} if $x<0$).
 \apiend
 
@@ -3180,9 +3201,9 @@ implemented per the ITU-R standard as $0.2126 R + 0.7152 G + 0.0722 B$.
 
 The {\cf blackbody()} function returns the blackbody emission (the
 incandescent glow of warm bodies) expected from a material of the given
-temperature in Kelvin, in units of $W/m^2$.  These are the appropriate
-units to multiply by {\cf emission()} to have a physically-correct
-result.
+temperature in Kelvin, in units of $W/m^2$. Note that {\cf emission()} has units
+of radiance, so will require a scaling factor of $1/\pi$ on surfaces, and
+$1/4\pi$ on volumes to convert to $W/m^2/sr$.
 \apiend
 
 \apiitem{color {\ce wavelength_color} (float wavelength_nm)}
@@ -3379,15 +3400,6 @@ is 0.
 \apiend
 \vspace{-16pt}
 
-\apiitem{"do_filter", <int>}
-\vspace{12pt}
-If {\cf do_filter} is 0, no filtering/antialiasing will
-be performed.  The default is 1 (yes, do filtering).  There is probably
-no good reason to ever turn off the filtering, it is primarily to test
-that the filtering is working properly.
-\apiend
-\vspace{-16pt}
-
 \apiitem{"bandwidth", <float>}
 \vspace{12pt}
 Controls the bandwidth for Gabor noise.
@@ -3491,6 +3503,7 @@ The old {\cf cellnoise(...coords...)} function is equivalent to
 {\cf noise("cell",...coords...)}.
 \apiend
 
+\begin{comment}   % couldn't find a use for this
 \apiitem{\emph{type} {\ce hash} (float u) \\
 \emph{type} {\ce hash} (float u, float v) \\
 \emph{type} {\ce hash} (point p) \\
@@ -3512,6 +3525,7 @@ The return \emph{type} may be any of \float, \color, \point, \vector, or
 (e.g., \point), each component is an uncorrelated \float\ {\cf hash}
 function.
 \apiend
+\end{comment}
 
 \apiitem{\emph{type} {\ce spline} (string basis, float x, \emph{type} $\mathtt{y}_0$, \emph{type} $\mathtt{y}_1$, ... \emph{type} $\mathtt{y}_{n-1}$)\\
 \emph{type} {\ce spline} (string basis, float x, \emph{type} y[]) \\
@@ -4125,7 +4139,7 @@ and has a parameter that matches the name and type specified, its value
 will be stored in \emph{destination} and {\cf gettextureinfo} will
 return {\cf 1}.  If the file is not found, or doesn't have a matching
 parameter (including if the type does not match), \emph{destination}
-will not be modified and {\cf getattribute} will return {\cf 0}.  Valid
+will not be modified and {\cf gettextureinfo} will return {\cf 0}.  Valid
 parameters recognized are listed below:
 
 \smallskip
@@ -4324,14 +4338,14 @@ values indicate a smoother surface).
 \apiend
 
 
-\apiitem{\colorclosure\ {\ce orennayar} (normal N, float roughness)}
-\indexapi{orennayar()}
+\apiitem{\colorclosure\ {\ce oren_nayar} (normal N, float sigma)}
+\indexapi{oren_nayar()}
 
 Returns a \colorclosure that represents the diffuse reflectance of a
 rough surface, implementing the Oren-Nayar reflectance formula.  The
-\emph{roughness} parameter indicates how smooth or rough the
+\emph{sigma} parameter indicates how smooth or rough the
 microstructure of the material is, with 0 being perfectly smooth and
-giving an appearance identical to {\cf lambert()}.
+giving an appearance identical to {\cf diffuse()}.
 
 The Oren-Nayar reflection model is described in  M.\ Oren and S.\ K.\
 Nayar, ``Generalization of Lambert's Reflectance Model,'' Proceedings of
@@ -4342,13 +4356,13 @@ Like all \closurecolors, the return ``value'' is symbolic and is may be
 evaluated at a later time convenient to the renderer in order to compute
 the exitant radiance in the direction {\cf -I}.  But aside from the
 fact that the shader cannot examine the numeric values of the
-\colorclosure, you may program \emph{as if} {\cf orennayar()} was
+\colorclosure, you may program \emph{as if} {\cf oren_nayar()} was
 implemented as follows:
 
 \begin{code}
     normal Nf = faceforward (normalize(N), I);
     vector V = -normalize(I);
-    float sigma2 = roughness * roughness;
+    float sigma2 = sigma * sigma;
     float A = 1 - 0.5 * sigma2 / (sigma2 + 0.33);
     float B = 0.45 * sigma2 / (sigma2 + 0.09);
     float  theta_r = acos (dot (V, Nf));         // Angle between V and N
@@ -4420,30 +4434,39 @@ implemented as follows:
 \apiend
 
 
-\apiitem{\colorclosure\ {\ce microfacet_beckmann} (normal N, float roughness,
-  float eta)}
-\indexapi{microfacet_beckmann()}
+\apiitem{\colorclosure\ {\ce microfacet} (string distribution, normal N, vector
+U, float xalpha, float yalpha, float eta, int refract)}
+\indexapi{microfacet()}
 
-Returns a \colorclosure that represents specular reflectance of the
-surface using a Beckmann microfacet BRDF (as described in Walter et al., 
-``Microfacet Models for Refraction through Rough Surfaces,''
-Eurographics Symposium on Rendering, 2007).
-The {\cf roughness} controls how rough the microstructure of the surface
-is.  The {\cf eta} parameter is the index of refraction of the material.
+Returns a \colorclosure that represents scattering on the
+surface using some microfacet distribution such as "beckmann" or "ggx" (as
+described in Walter et al., ``Microfacet Models for Refraction through Rough
+Surfaces,'' Eurographics Symposium on Rendering, 2007).
+Both {\cf xalpha} and {\cf yalpha} control how rough the microstructure of the
+surface is, possibly in an anisotropic way if they are different. In the
+anisotropic case {\cf U} must be a vector orthogonal to {\cf N} to specify the
+direction.  These values are expected to be the alpha values of the distribution
+as it appears in the literature, not a universal roughness measure.
+The {\cf eta} parameter is the index of refraction of the material, and
+{\cf refract} is a boolean flag to make the BSDF refractive instead of
+reflective. The implementation must not rely on {\cf U} when the roughness is
+isotropic or the given vector is zero.
+
+The list of supported distributions will change from renderer to renderer, and
+also the behavior when an unsupported distribution is requested. It is up to the
+implementation to issue an error or to default to a supported one. Also it is
+expected that the alias "default" must work as a distribution in any renderer.
 
 \apiend
 
 
-\apiitem{\colorclosure\ {\ce microfacet_ggx} (normal N, float roughness,
-  float eta)}
-\indexapi{microfacet_ggx()}
+\apiitem{\colorclosure\ {\ce microfacet} (string distribution, normal N,
+float alpha, float eta, int refract)}
+\indexapi{microfacet()}
 
-Returns a \colorclosure that represents specular reflectance of the
-surface using the ``GGX'' microfacet BRDF described in Walter et al., 
-``Microfacet Models for Refraction through Rough Surfaces,''
-Eurographics Symposium on Rendering, 2007.
-The {\cf roughness} controls how rough the microstructure of the surface
-is.  The {\cf eta} parameter is the index of refraction of the material.
+Returns a \colorclosure that represents scattering on the
+surface using some microfacet distribution. A simplified isotropic version of
+the previous function.
 
 \apiend
 
@@ -4486,34 +4509,6 @@ implemented as follows:
     fresnel (I, N, eta, Kr, Kt, R, T);
     return Kt * raytrace (T);
 \end{code}
-\apiend
-
-
-\apiitem{\colorclosure\ {\ce microfacet_beckmann_refraction} (normal N,
-\\ \bigspc\bigspc\bigspc  float roughness, float eta)}
-\indexapi{microfacet_beckmann_refraction()}
-
-Returns a \colorclosure that represents refraction of the surface using
-the ``Beckmann'' microfacet BRDF, and is coordinated so that it is
-energy-balanced with the corresponding {\cf microfacet_beckmann}.  The
-{\cf roughness} parameter controls how rough the microstructure of the
-surface is.  The {\cf eta} parameter is the index of refraction of the
-material.
-
-\apiend
-
-
-\apiitem{\colorclosure\ {\ce microfacet_ggx_refraction} (normal N,
-\\ \bigspc\bigspc\bigspc  float roughness, float eta)}
-\indexapi{microfacet_ggx_refraction()}
-
-Returns a \colorclosure that represents refraction of the
-surface using the ``GGX'' microfacet BRDF, and is coordinated
-so that it is energy-balanced with the corresponding {\cf microfacet_ggx}.
-The {\cf roughness} parameter controls how rough the microstructure of
-the surface is.  The {\cf eta} parameter is the index of refraction of
-the material.
-
 \apiend
 
 
@@ -4603,16 +4598,14 @@ normal. When called in the context of a volume shader group, it implies
 that light is emitted evenly in all directions around the point being
 shaded.
 
-The emission closure returns a radiance value (e.g.,
-$\mathrm{W}\cdot\mathrm{sr}^{-1}\cdot\mathrm{m}^{-2}$) that, integrated
-over all angles, yields a power density of 1.0 (e.g.,
-$\mathrm{W}\cdot\mathrm{m}^{-2}$). This may be multiplied by a scalar to
-adjust the desired power density of your light.
+The weight of the emission closure has units of radiance (e.g.,
+$\mathrm{W}\cdot\mathrm{sr}^{-1}\cdot\mathrm{m}^{-2}$). This means that a surface
+directly seen by the camera will directly reproduce the closure weight in the
+final pixel, regardless of being a surface or a volume.
 
 For surface emission, If you divide {\cf emission()} by 
-{\cf surfacearea()}, then you can easily specify the total emissive
-power of the light (e.g., $\mathrm{W}$), regardless of its physical
-size.
+{\cf surfacearea() * M_PI}, then you can easily specify the total emissive
+power of the light (e.g., $\mathrm{W}$), regardless of its physical size.
 \apiend
 
 
@@ -4667,7 +4660,8 @@ If an object is explicitly named, that is the only place that will be
 searched (\qkw{global} means the global scene-wide attributes).  For the
 forms of the function with no object name, or if the object name is the
 empty string \qkw{}, the renderer will first search
-per-object attributes on the current object, then if not found it will search
+per-object attributes on the current object (or interpolated variables
+with that name attached to the object), then if not found it will search
 searching global scene-wide attributes.  
 
 If the attribute is found and can be converted to the type of
@@ -4692,7 +4686,41 @@ case, \emph{name} must be an array attribute, the type of
 \emph{destination} must be the type of the array element (not the type
 of the whole array), and the value of \emph{arrayindex} must be a valid
 index given the array's size.
+
+Tables giving ``standardized'' names for different kinds of attributes may
+be found below. All renderers are expected to use the same names for these
+attributes, but are free to choose any names for additional attributes they
+wish to make queryable.
 \apiend
+
+\begin{table}[htbp]
+\caption{Names of standard camera attributes that may be retrieved.
+If the {\cf getattribute()} function specifies an {\cf objectname} parameter
+and it is the name of a valid camera, the value specific to that camera
+is retrieved. If no specific camera is named, the global or default
+camera is implied.
+}\label{tab:cameraattributes}
+\begin{tabular}{|p{1.8in}|p{0.6in}|p{2.8in}|}
+\hline
+{\bf Name} & {\bf Type} & {\bf Description} \\
+\hline
+{\cf "camera:resolution"}     & {\cf int[2]}    & Image resolution. \\
+{\cf "camera:pixelaspect"}    & {\cf float}     & Pixel aspect ratio. \\
+{\cf "camera:projection"}     & {\cf string}    & Projection type (e.g.,
+            \qkw{perspective}, \qkw{orthographic}, etc.)  \\
+{\cf "camera:fov"}            & {\cf float}     & Field of fiew. \\
+{\cf "camera:clip_near"}      & {\cf float}     & Near clip distance. \\
+{\cf "camera:clip_far"}       & {\cf float}     & Far clip distance. \\
+{\cf "camera:clip"}           & {\cf float[2]}  & Near and far clip distances. \\
+{\cf "camera:shutter_open"}   & {\cf float}     & Shutter open time. \\
+{\cf "camera:shutter_close"}  & {\cf float}     & Shutter close time. \\
+{\cf "camera:shutter"}        & {\cf float[2]}  & Shutter open and close times. \\
+{\cf "camera:screen_window"}  & {\cf float[4]}  & Screen window (xmin, ymin, xmax, ymax). \\
+\hline
+\end{tabular}
+\end{table}
+
+\newpage
 
 \apiitem{void {\ce setmessage} (string name, output \emph{type} value)}
 \indexapi{setmessage()}
@@ -4783,7 +4811,7 @@ by the shader (via {\cf setmessage()}).
 
 \apiend
 
-\apiitem{int {\ce surfacearea} ()}
+\apiitem{float {\ce surfacearea} ()}
 \indexapi{surfacearea()}
 Returns the surface area of the area light geometry being shaded.  This
 is meant to be used in conjunction with {\cf emission()} in order to 
@@ -4811,6 +4839,13 @@ OSL, but is expected to include at a minimum \qkw{camera},
 \qkw{shadow}, \qkw{diffuse}, \qkw{glossy}, \qkw{reflection},
 \qkw{refraction}.  They are not necessarily mutually exclusive, with the
 exception that camera rays should be of class \qkw{camera} and no other.
+\apiend
+
+\apiitem{int {\ce backfacing} ()}
+\indexapi{backfacing()}
+Returns 1 if the surface is being sampled as if ``seen'' from the back
+of the surface (or the ``inside'' of a closed object). Returns 0 if seen
+from the ``front'' or the ``outside'' of a closed object.
 \apiend
 
 \apiitem{int {\ce isconnected} (\emph{type} parameter)}
@@ -5180,6 +5215,106 @@ nothing (empty, no token).
 \end{grammar}
 
 
+\chapter{Describing shader groups}
+\label{chap:describingshadergroups}
+\label{sec:serialize}
+
+Below, we propose a simple grammar giving a standard way to serialize (i.e.,
+express as text) a full shader group, including instance values and
+connectivity of the shader layers. There are only three
+statements/operations: set an instance value, make a shader instance, and
+connect two instances.
+
+\apiitem{{\ce param} {\rm \emph{type} \emph{paramname} \emph{value...}} {\ce ;} \\
+{\ce param} {\rm \emph{type} \emph{paramname} \emph{value...}} {\ce [[}{\rm\emph{metadata...}}{\ce ]] ;} }
+
+Declare an instance value of a shader parameter to be applied to the next
+{\cf shader} statement. We refer to the parameter values set, which have
+not yet had their shader declared, as \emph{pending parameters}.
+
+The \emph{paramname} is the name of the parameter whose instance values are
+being specified.
+
+The \emph{type} is one of the basic numeric or
+string data types described in Chapter~\ref{chap:types} ({\cf int}, {\cf
+float}, {\cf color}, {\cf point}, {\cf vector}, {\cf normal}, {\cf matrix},
+or {\cf string}), or an array thereof (indicated by the usual notation of
+{\cf [{\rm\emph{size}}]}). The \emph{type} must match the declared type
+of the parameter in the shader.
+
+The actual values are listed individually, with multiple values (in the
+case of an array or an aggregate such as a \color) simply separated by
+whitespace. If fewer values are supplied than the total number of array
+elements or aggregate components, the remainder will be understood to be
+filled with 0 values. String values must be enclosed in double quotes
+({\cf "like this"}).
+
+The {\cf param} statement is terminated by a semicolon ({\cf ;}).
+
+Optionally, metadata hints may be supplied enclosed by double brackets,
+immediately before the semicolon.
+\apiend
+
+
+\apiitem{{\ce shader} {\rm \emph{shadername} \emph{layername}} {\ce ;}}
+Declares a shader instance, which will receive any pending parameters that
+were declared since the previous {\cf shader} statement (and in the process,
+clear the list of pending parameters).
+
+The {\cf shadername} is an identifier that specifies the name of the shader
+to use as the master for this instance. The {\cf layername} is an identifier
+that names the layer (e.g., to subsequently specify it as a source or
+destination for connections).
+
+The {\cf shader} statement is terminated by a semicolon ({\cf ;}).
+\apiend
+
+
+\apiitem{{\ce connect} {\rm \emph{source_layername}{\ce .}\emph{paramname} ~
+                        \emph{destination_layername}{\ce .}\emph{paramname}} {\ce ;}}
+
+Establish a connection between an output parameter of a source layer and an
+input parameter of a destination layer, both of which have been previously
+declared within this group. The source layer must have preceded the
+destination layer when they were declared, and the parameters must exist and
+be of a compatible type so that it is meaningful to establish a connection
+(for example, you may connect a \color to a \color, but you may not connect
+a \color to a \matrix).
+
+If the named parameters are structures, the two structures must have
+identical data layout, and establishing the connection will connect each
+corresponding data member.  It is also possible to make a connection of just
+a single member of a structure by using the usual ``dot'' syntax, for
+example, for layers {\cf A} and {\cf B}, \qkw{connect A.c.x B.y} might
+connect A's parameter {\cf c}, member {\cf x}, to B's parameter {\cf y} (the
+types of {\cf c.x} in A and {\cf y} in B must match).
+
+The {\cf connect} statement is terminated by a semicolon ({\cf ;}).
+\apiend
+
+\subsection*{Example}
+
+\begin{tabular}{p{3.25in} p{2.5in}}
+    {\cf param string name "rings.tx" ; } &  \emph{set pending `name'} \\
+    {\cf param float scale 3.5 ; } &  \emph{set pending `scale'} \\
+    {\cf shader "texturemap" "tex1" ; } & \emph{tex1 layer, picks up `name', `scale'} \\
+    {\cf param string name "grain.tx" ; } & \\
+    {\cf shader "texturemap" "tex2" ; } & \emph{} \\
+    {\cf param float gam 2.2 ; } & \emph{} \\
+    {\cf shader "gamma" "gam1" ; } & \emph{} \\
+    {\cf param float gam 1.0 ; } & \emph{} \\
+    {\cf shader "gamma" "gam2" ; } & \emph{} \\
+    {\cf param color woodcolor 0.42 0.38 0.22 ; } & \emph{example of a color param} \\
+    {\cf shader "wood" "wood1" ; } & \emph{} \\
+    {\cf connect tex1.Cout gam1.Cin ; } & \emph{connect tex1's Cout to gam1's Cin} \\
+    {\cf connect tex2.Cout gam2.Cin ; } & \emph{} \\
+    {\cf connect gam1.Cout wood1.rings ; } & \emph{} \\
+    {\cf connect gam2.Cout wood1.grain ; } & \emph{} \\
+\end{tabular}
+
+
+\begin{comment}
+
 \chapter{Example Shaders}
 \label{chap:exampleshaders}
 
@@ -5188,6 +5323,8 @@ Sorry, I haven't done this yet.  Eventually, this chapter will have
 several simple (but useful and fully functional) shaders to illustrate
 how all these concepts fit together.
 \end{annotate}
+
+\end{comment}
 
 
 \begin{comment}

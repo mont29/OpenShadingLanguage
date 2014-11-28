@@ -34,9 +34,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <boost/foreach.hpp>
 
-#include "OpenImageIO/strutil.h"
-#include "OpenImageIO/dassert.h"
-#include "OpenImageIO/thread.h"
+#include <OpenImageIO/strutil.h>
+#include <OpenImageIO/dassert.h>
+#include <OpenImageIO/thread.h>
 
 #include "oslexec_pvt.h"
 #include "../liboslcomp/oslcomp_pvt.h"
@@ -210,7 +210,7 @@ ShaderMaster::print ()
 {
     std::stringstream out;
     out << "Shader " << m_shadername << " type=" 
-              << shadertypename(m_shadertype) << "\n";
+              << shadertypename() << "\n";
     out << "  path = " << m_osofilename << "\n";
     out << "  symbols:\n";
     for (size_t i = 0;  i < m_symbols.size();  ++i) {

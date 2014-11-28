@@ -33,11 +33,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <set>
 #include <map>
 
-#include "oslconfig.h"
-#include "oslcomp.h"
+#include "OSL/oslcomp.h"
 #include "ast.h"
 #include "symtab.h"
-#include "genclosure.h"
+#include "OSL/genclosure.h"
 
 
 class oslFlexLexer;
@@ -60,16 +59,16 @@ typedef std::map<const Symbol *, SymPtrSet> SymDependencyMap;
 
 
 
-class OSLCompilerImpl : public OSL::OSLCompiler {
+class OSLCompilerImpl {
 public:
     OSLCompilerImpl ();
-    virtual ~OSLCompilerImpl ();
+    ~OSLCompilerImpl ();
 
     /// Fully compile a shader located in 'filename', with the command-line
     /// options ("-I" and the like) in the options vector.
-    virtual bool compile (const std::string &filename,
-                          const std::vector<std::string> &options,
-                          const std::string &stdoslpath = "");
+    bool compile (string_view filename,
+                  const std::vector<string_view> &options,
+                  string_view stdoslpath);
 
     /// The name of the file we're currently parsing
     ///
@@ -97,18 +96,18 @@ public:
 
     /// Error reporting
     ///
-    void error (ustring filename, int line, const char *format, ...);
+    void error (ustring filename, int line, const char *format, ...) const;
 
     /// Warning reporting
     ///
-    void warning (ustring filename, int line, const char *format, ...);
+    void warning (ustring filename, int line, const char *format, ...) const;
 
     /// Have we hit an error?
     ///
     bool error_encountered () const { return m_err; }
 
     /// Has a shader already been defined?
-    bool shader_is_defined () const { return m_shader; }
+    bool shader_is_defined () const { return (bool)m_shader; }
 
     /// Define the shader we're compiling with the given AST root.
     ///
@@ -221,7 +220,7 @@ public:
     void add_struct_fields (StructSpec *structspec, ustring basename,
                             SymType symtype, int arraylen, ASTNode *node=NULL);
 
-    std::string output_filename () const { return m_output_filename; }
+    string_view output_filename () const { return m_output_filename; }
 
     /// Push the designated function on the stack, to keep track of
     /// nesting and so recursed methods can query which is the current
@@ -297,7 +296,9 @@ private:
     void write_oso_const_value (const ConstantSymbol *sym) const;
     void write_oso_symbol (const Symbol *sym);
     void write_oso_metadata (const ASTNode *metanode) const;
-    void oso (const char *fmt, ...) const;
+    // void oso (const char *fmt, ...) const;
+    TINYFORMAT_WRAP_FORMAT (void, oso, const,
+        std::ostringstream buf;, buf, fputs(buf.str().c_str(), m_osofile);)
 
     void track_variable_lifetimes () {
         track_variable_lifetimes (m_ircode, m_opargs, symtab().allsyms());
@@ -358,7 +359,7 @@ private:
     std::string m_main_filename; ///< Main input filename
     std::string m_cwd;        ///< Current working directory
     ASTNode::ref m_shader;    ///< The shader's syntax tree
-    bool m_err;               ///< Has an error occurred?
+    mutable bool m_err;       ///< Has an error occurred?
     SymbolTable m_symtab;     ///< Symbol table
     TypeSpec m_current_typespec;  ///< Currently-declared type
     bool m_current_output;        ///< Currently-declared output status

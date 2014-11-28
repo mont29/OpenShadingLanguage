@@ -2,7 +2,7 @@ project (OSL)
 
 # Release version of the library
 set (OSL_LIBRARY_VERSION_MAJOR 1)
-set (OSL_LIBRARY_VERSION_MINOR 5)
+set (OSL_LIBRARY_VERSION_MINOR 6)
 set (OSL_LIBRARY_VERSION_PATCH 2)
 set (OSL_LIBRARY_VERSION_RELEASE_TYPE "dev")   # "dev", "betaX", "RCY", ""
 
@@ -49,16 +49,20 @@ if (CMAKE_COMPILER_IS_GNUCC)
 endif ()
 message (STATUS "CMAKE_CXX_COMPILER is ${CMAKE_CXX_COMPILER}")
 message (STATUS "CMAKE_CXX_COMPILER_ID is ${CMAKE_CXX_COMPILER_ID}")
-if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set (CMAKE_COMPILER_IS_CLANG 1)
     message (STATUS "Using clang as the compiler")
 endif ()
 # Second try: for earlier versions of CMake, the CMAKE_CXX_COMPILER_ID
 # appears to be unreliable and may say "GNU" despite using clang, so
 # directly match against the compiler name.
-if ("${CMAKE_CXX_COMPILER}" MATCHES ".*clang.*")
+if (CMAKE_CXX_COMPILER MATCHES "[Cc]lang")
     set (CMAKE_COMPILER_IS_CLANG 1)
     message (STATUS "The compiler seems to be clang")
+endif ()
+if (CMAKE_CXX_COMPILER_ID MATCHES "Intel")
+    set (CMAKE_COMPILER_IS_INTEL 1)
+    message (STATUS "Using Intel as the compiler")
 endif ()
 
 ## turn on more detailed warnings and consider warnings as errors
@@ -109,6 +113,9 @@ if (CMAKE_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNUCC)
     # CMake doesn't automatically know what do do with
     # include_directories(SYSTEM...) when using clang or gcc.
     set (CMAKE_INCLUDE_SYSTEM_FLAG_CXX "-isystem ")
+    
+    # this allows native instructions to be used for sqrtf instead of a function call
+    add_definitions ("-fno-math-errno")
 endif ()
 
 if (CMAKE_COMPILER_IS_CLANG)
@@ -116,6 +123,10 @@ if (CMAKE_COMPILER_IS_CLANG)
     add_definitions ("-Qunused-arguments -Wno-unknown-pragmas")
     # disable warning in flex-generated code
     add_definitions ("-Wno-null-conversion")
+endif ()
+
+if (CMAKE_COMPILER_IS_GNUCC)
+    add_definitions ("-Wno-error=strict-overflow")
 endif ()
 
 if (CMAKE_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNUCC)
@@ -133,9 +144,8 @@ if (CMAKE_COMPILER_IS_CLANG OR CMAKE_COMPILER_IS_GNUCC)
 endif ()
 
 # Try to detect if this is an OSX distro new enough that the system library
-# is libc++, in which case we should force use of Boost Wave (because that
-# avoids a nonstandard g++ extension in the other code path).
-if (EXISTS "/usr/lib/libc++.dylib" OR OSL_USE_LIBCPP)
+# is libc++.
+if (EXISTS "/usr/lib/libc++.dylib")
     set (OSL_SYSTEM_HAS_LIBCPP ON)
 endif ()
 
@@ -150,12 +160,18 @@ if (WIN32)
 else ()
     set (USE_LLVM_BITCODE ON CACHE BOOL "Generated embedded LLVM bitcode")
 endif ()
-if (WIN32 OR OSL_SYSTEM_HAS_LIBCPP)
+set (USE_PARTIO ON CACHE BOOL "Use Partio if found")
+set (USE_MCJIT OFF CACHE BOOL "Use LLVM MCJIT (if no, then use old JIT)")
+set (USE_FAST_MATH ON CACHE BOOL "Use fast math approximations (if no, then use system math library)")
+set (USE_CPP11 OFF CACHE BOOL "Compile in C++11 mode")
+set (USE_LIBCPLUSPLUS OFF CACHE BOOL "Compile with clang libc++")
+set (EXTRA_CPP_ARGS "" CACHE STRING "Extra C++ command line definitions")
+set (USE_SIMD "" CACHE STRING "Use SIMD directives (0, sse2, sse3, sse4.1, sse4.2)")
+if (WIN32 OR OSL_SYSTEM_HAS_LIBCPP OR USE_LIBCPLUSPLUS OR USE_CPP11)
     set (USE_BOOST_WAVE ON CACHE BOOL "Use Boost Wave as preprocessor")
 else ()
     set (USE_BOOST_WAVE OFF CACHE BOOL "Use Boost Wave as preprocessor")
 endif ()
-set (USE_PARTIO ON CACHE BOOL "Use Partio if found")
 
 if (LLVM_NAMESPACE)
     add_definitions ("-DLLVM_NAMESPACE=${LLVM_NAMESPACE}")
@@ -165,17 +181,50 @@ if (USE_EXTERNAL_PUGIXML)
     add_definitions ("-DUSE_EXTERNAL_PUGIXML")
 endif ()
 
-if (EXTRA_CPP_DEFINITIONS)
-    add_definitions ("${EXTRA_CPP_DEFINITIONS}")
-endif()
-
 if (USE_BOOST_WAVE)
     add_definitions ("-DUSE_BOOST_WAVE")
 endif ()
 
-if (CMAKE_COMPILER_IS_CLANG AND OSL_USE_LIBCPP)
+if (USE_MCJIT)
+    add_definitions ("-DUSE_MCJIT=1")
+endif ()
+
+if (USE_FAST_MATH)
+	add_definitions ("-DOSL_FAST_MATH=1")
+else ()
+	add_definitions ("-DOSL_FAST_MATH=0")
+endif ()
+
+if (EXTRA_CPP_ARGS)
+    message (STATUS "Extra C++ args: ${EXTRA_CPP_ARGS}")
+    add_definitions ("${EXTRA_CPP_ARGS}")
+endif()
+
+if (USE_CPP11)
+    message (STATUS "Building for C++11")
+    add_definitions ("-std=c++11")
+    if (CMAKE_COMPILER_IS_CLANG)
+        # C++11 doesn't like 'register' keyword, which is in Qt headers
+        add_definitions ("-Wno-deprecated-register")
+    endif ()
+endif ()
+
+if (USE_LIBCPLUSPLUS AND CMAKE_COMPILER_IS_CLANG)
     message (STATUS "Using libc++")
     add_definitions ("-stdlib=libc++")
+endif ()
+
+if (NOT USE_SIMD STREQUAL "")
+    message (STATUS "Compiling with SIMD level ${USE_SIMD}")
+    if (USE_SIMD STREQUAL "0")
+        add_definitions ("-DOIIO_NO_SSE=1")
+    else ()
+        if (MSVC OR CMAKE_COMPILER_IS_INTEL)
+            add_definitions ("/arch:{USE_SIMD}")
+        else ()
+            add_definitions ("-m${USE_SIMD}")
+        endif ()
+    endif ()
 endif ()
 
 set (CMAKE_MODULE_PATH
@@ -189,10 +238,11 @@ include (externalpackages)
 include (flexbison)
 include_directories (
       "${CMAKE_SOURCE_DIR}/src/include"
-      "${CMAKE_BINARY_DIR}/include"
+      "${CMAKE_BINARY_DIR}/include/OSL"
       "${OPENIMAGEIO_INCLUDES}"
   )
 
+# Set the default namespace
 if (OSL_NAMESPACE)
     add_definitions ("-DOSL_NAMESPACE=${OSL_NAMESPACE}")
 endif ()
@@ -275,8 +325,10 @@ macro ( TESTSUITE )
             message (STATUS "TEST ${_testname}: ${CMAKE_BINARY_DIR}/testsuite/runtest.py ${_testdir} ${_extra_test_args}")
         endif ()
 
-        # Run the test unoptimized
-        if (NOT _testname MATCHES "^render")
+        # Run the test unoptimized, unless it's a "render_*" or "oslinfo_*"
+        # test, which we don't bother testing unoptimized.
+        if (NOT _testname MATCHES "^render" AND
+            NOT _testname MATCHES "^oslinfo")
           set (_env TESTSHADE_OPT=0 OPENIMAGEIOHOME=${OPENIMAGEIOHOME})
           add_test ( NAME ${_testname}
                      COMMAND env ${_env} ${_runtest} )
@@ -291,26 +343,33 @@ endmacro ()
 
 # List all the individual testsuite tests here, except those that need
 # special installed tests.
-#TESTSUITE ( oslc-empty )
 TESTSUITE ( aastep arithmetic array array-derivs array-range
             blackbody blendmath breakcont
-            bug-locallifetime bug-outputinit bug-peep
+            bug-array-heapoffsets
+            bug-locallifetime bug-outputinit bug-param-duplicate bug-peep
             cellnoise closure color comparison
-            component-range const-array-params debugnan debug-uninit
+            component-range const-array-params const-array-fill
+            debugnan debug-uninit
             derivs derivs-muldiv-clobber error-dupes exit exponential
             function-earlyreturn function-simple function-outputelem
-            geomath getsymbol-nonheap gettextureinfo hyperb
-            ieee_fp if incdec initops intbits isconnected
+            geomath getattribute-camera getsymbol-nonheap gettextureinfo
+            group-outputs groupstring
+            hyperb ieee_fp if incdec initops intbits isconnected
             layers layers-Ciassign layers-lazy
             logic loop matrix message metadata-braces miscmath missing-shader
             noise noise-cell
             noise-gabor noise-gabor2d-filter noise-gabor3d-filter
             noise-perlin noise-uperlin noise-simplex noise-usimplex
             pnoise pnoise-cell pnoise-gabor pnoise-perlin pnoise-uperlin
+            oslc-D
             oslc-err-arrayindex oslc-err-closuremul
             oslc-err-format oslc-err-intoverflow
             oslc-err-noreturn oslc-err-paramdefault
+            oslc-err-struct-array-init oslc-err-struct-dup
+            oslc-variadic-macro
+            oslinfo-metadata oslinfo-noparams
             pointcloud pointcloud-fold
+            printf-whole-array
             raytype reparam
             render-background render-bumptest
             render-cornell render-furnace-diffuse
@@ -319,7 +378,7 @@ TESTSUITE ( aastep arithmetic array array-derivs array-range
             struct struct-array struct-array-mixture
             struct-err struct-layers struct-with-array 
             struct-within-struct ternary
-            texture-alpha texture-blur texture-field3d
+            texture-alpha texture-blur texture-derivs texture-field3d
             texture-firstchannel texture-interp 
             texture-missingcolor texture-simple
             texture-smallderivs texture-swirl

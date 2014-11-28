@@ -481,9 +481,17 @@ closure color microfacet_ggx(normal N, float ag, float eta) BUILTIN;
 closure color microfacet_ggx_refraction(normal N, float ag, float eta) BUILTIN;
 closure color microfacet_beckmann(normal N, float ab, float eta) BUILTIN;
 closure color microfacet_beckmann_refraction(normal N, float ab, float eta) BUILTIN;
+closure color microfacet(string distribution, normal N, vector U, float xalpha,
+                         float yalpha, float eta, int refract) BUILTIN;
+closure color microfacet(string distribution, normal N, float alpha, float eta,
+                         int refr)
+{
+    return microfacet(distribution, N, vector(0), alpha, alpha, eta, refr);
+}
 closure color ward(normal N, vector T,float ax, float ay) BUILTIN;
 closure color phong(normal N, float exponent) BUILTIN;
 closure color phong_ramp(normal N, float exponent, color colors[8]) BUILTIN;
+closure color oren_nayar (normal N, float sigma) BUILTIN;
 closure color hair_diffuse(vector T) BUILTIN;
 closure color hair_specular(vector T, float offset, float exponent) BUILTIN;
 closure color ashikhmin_velvet(normal N, float sigma, float eta) BUILTIN;
@@ -549,6 +557,7 @@ closure color cloth(normal N, float s, float t, color diff_warp, color diff_weft
 
 
 // Renderer state
+int backfacing () BUILTIN;
 int raytype (string typename) BUILTIN;
 // the individual 'isFOOray' functions are deprecated
 int iscameraray () { return raytype("camera"); }

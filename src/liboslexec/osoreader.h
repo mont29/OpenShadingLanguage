@@ -30,7 +30,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "osl_pvt.h"
 
-#include "OpenImageIO/thread.h"
+#include <OpenImageIO/thread.h>
 
 
 
@@ -88,6 +88,10 @@ public:
     ///
     virtual void symdefault (const char *def) { }
 
+    /// Called when we're done with all information related to a parameter
+    /// symbol.
+    virtual void parameter_done () { }
+
     /// Return true for parsers whose only purpose is to read the header up
     /// to params, to stop parsing as soon as we start encountering temps in
     /// the symbol table.
@@ -132,6 +136,9 @@ public:
     /// Return the line number (for error reporting).  Should only
     /// be called by the lexer.
     int lineno () const { return m_lineno; }
+
+    /// Return a reference to the error handler
+    ErrorHandler& errhandler () { return m_err; }
 
     /// Pointer to the one and only lexer in effect.  This is 'public',
     /// but NOBODY should modify this except for this class and the

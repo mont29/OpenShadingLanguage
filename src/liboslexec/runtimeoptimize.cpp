@@ -1026,6 +1026,23 @@ RuntimeOptimizer::coerce_assigned_constant (Opcode &op)
         return true;
     }
 
+    // turn 'R_matrix = A_float_const' into a matrix const assignment
+    if (A->typespec().is_float() && R->typespec().is_matrix()) {
+        float f = *(float *)A->data();
+        Matrix44 result (f, 0, 0, 0, 0, f, 0, 0, 0, 0, f, 0, 0, 0, 0, f);
+        int cind = add_constant (R->typespec(), &result);
+        turn_into_assign (op, cind, "coerce to correct type");
+        return true;
+    }
+    // turn 'R_matrix = A_int_const' into a matrix const assignment
+    if (A->typespec().is_int() && R->typespec().is_matrix()) {
+        float f = *(int *)A->data();
+        Matrix44 result (f, 0, 0, 0, 0, f, 0, 0, 0, 0, f, 0, 0, 0, 0, f);
+        int cind = add_constant (R->typespec(), &result);
+        turn_into_assign (op, cind, "coerce to correct type");
+        return true;
+    }
+
     return false;
 }
 
@@ -1075,8 +1092,10 @@ RuntimeOptimizer::simple_sym_assign (int sym, int opnum)
         std::map<int,int>::iterator i = m_stale_syms.find(sym);
         if (i != m_stale_syms.end()) {
             Opcode &uselessop (inst()->ops()[i->second]);
-            turn_into_nop (uselessop,
-                           debug() > 1 ? Strutil::format("remove stale value assignment to %s, reassigned on op %d", opargsym(uselessop,0)->name().c_str(), opnum).c_str() : "");
+            if (uselessop.opname() != u_nop)
+                turn_into_nop (uselessop,
+                           debug() > 1 ? Strutil::format("remove stale value assignment to %s, reassigned on op %d",
+                                                         opargsym(uselessop,0)->name(), opnum).c_str() : "");
         }
     }
     m_stale_syms[sym] = opnum;
@@ -1101,7 +1120,7 @@ RuntimeOptimizer::unread_after (const Symbol *A, int opnum)
             return false;   // Asked not do do this optimization
         if (A->connected_down())
             return false;   // Connected to something downstream
-        if (shadingsys().is_renderer_output (A->name()))
+        if (A->renderer_output())
             return false;   // This is a renderer output -- don't cull it
     }
 
@@ -1260,9 +1279,11 @@ RuntimeOptimizer::outparam_assign_elision (int opnum, Opcode &op)
         int cind = inst()->args()[op.firstarg()+1];
         global_alias (inst()->args()[op.firstarg()], cind);
 
-        // If it's also never read before this assignment, just replace its
-        // default value entirely and get rid of the assignment.
-        if (R->firstread() > opnum) {
+        // If it's also never read before this assignment and isn't a
+        // designated renderer output (which we obviously must write!), just
+        // replace its default value entirely and get rid of the assignment.
+        if (R->firstread() > opnum && ! R->renderer_output() &&
+                m_opt_elide_unconnected_outputs) {
             make_param_use_instanceval (R, "- written once, with a constant, before any reads");
             replace_param_value (R, A->data(), A->typespec());
             turn_into_nop (op, debug() > 1 ? Strutil::format("oparam %s never subsequently read or connected", R->name().c_str()).c_str() : "");
@@ -1272,7 +1293,8 @@ RuntimeOptimizer::outparam_assign_elision (int opnum, Opcode &op)
 
     // If the output param will neither be read later in the shader nor
     // connected to a downstream layer, then we don't really need this
-    // assignment at all.
+    // assignment at all. Note that unread_after() does take into
+    // consideration whether it's a renderer output.
     if (unread_after(R,opnum)) {
         turn_into_nop (op, debug() > 1 ? Strutil::format("oparam %s never subsequently read or connected", R->name().c_str()).c_str() : "");
         return true;
@@ -1384,7 +1406,7 @@ public:
                 return false;   // Asked not to do this optimization
             if (sym.connected_down())
                 return false;   // Connected to something downstream
-            if (m_rop.shadingsys().is_renderer_output (sym.name()))
+            if (sym.renderer_output())
                 return false;   // This is a renderer output
             return (sym.lastuse() < sym.initend());
         }
@@ -2080,6 +2102,19 @@ RuntimeOptimizer::resolve_isconnected ()
         if (op.opname() == u_isconnected) {
             inst()->make_symbol_room (1);
             SymbolPtr s = inst()->argsymbol (op.firstarg() + 1);
+            while (const StructSpec *structspec = s->typespec().structspec()) {
+                // How to deal with structures -- just change the reference
+                // to the first field in the struct.
+                // FIXME -- if we ever allow separate layer connection of
+                // individual struct members, this will need something more
+                // sophisticated.
+                ASSERT (structspec && structspec->numfields() >= 1);
+                std::string fieldname = (s->name().string() + "." +
+                                         structspec->field(0).name.string());
+                int fieldsymid = inst()->findparam (ustring(fieldname));
+                ASSERT (fieldsymid >= 0);
+                s = inst()->symbol(fieldsymid);
+            }
             if (s->connected())
                 turn_into_assign_one (op, "resolve isconnected() [1]");
             else
@@ -2591,8 +2626,11 @@ RuntimeOptimizer::run ()
     Timer rop_timer;
     int nlayers = (int) group().nlayers ();
     if (debug())
-        shadingsys().info ("About to optimize shader group %s (%d layers):",
-                           group().name().c_str(), nlayers);
+        shadingcontext()->info ("About to optimize shader group %s (%d layers):",
+                           group().name(), nlayers);
+
+    if (shadingsys().m_opt_merge_instances == 1)
+        shadingsys().merge_instances (group());
 
     m_params_holding_globals.resize (nlayers);
 
@@ -2602,7 +2640,7 @@ RuntimeOptimizer::run ()
         set_inst (layer);
         if (inst()->unused())
             continue;
-        inst()->copy_code_from_master ();
+        inst()->copy_code_from_master (group());
         if (debug() && optimize() >= 1) {
             std::cout.flush ();
             std::cout << "Before optimizing layer " << layer << " " 
@@ -2673,17 +2711,79 @@ RuntimeOptimizer::run ()
         if (optimize() >= 1) {
             collapse_syms ();
             collapse_ops ();
-            if (debug()) {
-                track_variable_lifetimes ();
-                std::cout << "After optimizing layer " << layer << " " 
-                          << inst()->layername() << " (" << inst()->id()
-                          << "): \n" << inst()->print() 
-                          << "\n--------------------------------\n\n";
-                std::cout.flush ();
-            }
+        }
+        inst()->compute_run_lazily ();
+        if (debug() && !inst()->unused()) {
+            track_variable_lifetimes ();
+            std::cout << "After optimizing layer " << layer << " " 
+                      << inst()->layername() << " (" << inst()->id() << ") :\n"
+                      << " connections in=" << inst()->nconnections()
+                      << " out? " << (inst()->outgoing_connections()?'y':'n')
+                      << "\n" << inst()->print() 
+                      << "\n--------------------------------\n\n";
+            std::cout.flush ();
         }
         new_nsyms += inst()->symbols().size();
         new_nops += inst()->ops().size();
+    }
+
+    m_unknown_textures_needed = false;
+    m_unknown_closures_needed = false;
+    m_textures_needed.clear();
+    m_closures_needed.clear();
+    m_globals_needed.clear();
+    m_userdata_needed.clear();
+    for (int layer = 0;  layer < nlayers;  ++layer) {
+        set_inst (layer);
+        if (inst()->unused())
+            continue;  // no need to print or gather stats for unused layers
+        // Find interpolated parameters
+        FOREACH_SYM (const Symbol &s, inst()) {
+            if ((s.symtype() == SymTypeParam || s.symtype() == SymTypeOutputParam)
+                && ! s.lockgeom()) {
+                UserDataNeeded udn (s.name(), s.typespec().simpletype(), s.has_derivs());
+                std::set<UserDataNeeded>::iterator found;
+                found = m_userdata_needed.find (udn);
+                if (found == m_userdata_needed.end())
+                    m_userdata_needed.insert (udn);
+                else if (udn.derivs && ! found->derivs) {
+                    m_userdata_needed.erase (found);
+                    m_userdata_needed.insert (udn);
+                }
+            }
+            if (s.symtype() == SymTypeGlobal) {
+                m_globals_needed.insert (s.name());
+            }
+        }
+        BOOST_FOREACH (const Opcode &op, inst()->ops()) {
+            const OpDescriptor *opd = shadingsys().op_descriptor (op.opname());
+            if (! opd)
+                continue;
+            if (opd->flags & OpDescriptor::Tex) {
+                // for all the texture ops, arg 1 is the texture name
+                Symbol *sym = opargsym (op, 1);
+                ASSERT (sym && sym->typespec().is_string());
+                if (sym->is_constant()) {
+                    ustring texname = *(ustring *)sym->data();
+                    m_textures_needed.insert (texname);
+                } else {
+                    m_unknown_textures_needed = true;
+                }
+            }
+            if (op.opname() == u_closure) {
+                // It's either 'closure result weight name' or 'closure result name'
+                Symbol *sym = opargsym (op, 1); // arg 1 is the closure name
+                if (sym && !sym->typespec().is_string())
+                    sym = opargsym (op, 2);
+                ASSERT (sym && sym->typespec().is_string());
+                if (sym->is_constant()) {
+                    ustring closurename = *(ustring *)sym->data();
+                    m_closures_needed.insert (closurename);
+                } else {
+                    m_unknown_closures_needed = true;
+                }
+            }
+        }
     }
 
     m_stat_specialization_time = rop_timer();
@@ -2697,13 +2797,25 @@ RuntimeOptimizer::run ()
         ss.m_stat_postopt_ops += new_nops;
     }
     if (shadingsys().m_compile_report) {
-        shadingsys().info ("Optimized shader group %s:",
-                           group().name() ? group().name().c_str() : "");
-        shadingsys().info (" spec %1.2fs, New syms %llu/%llu (%5.1f%%), ops %llu/%llu (%5.1f%%)",
+        shadingcontext()->info ("Optimized shader group %s:", group().name());
+        shadingcontext()->info (" spec %1.2fs, New syms %llu/%llu (%5.1f%%), ops %llu/%llu (%5.1f%%)",
               m_stat_specialization_time, new_nsyms, old_nsyms,
               100.0*double((long long)new_nsyms-(long long)old_nsyms)/double(old_nsyms),
               new_nops, old_nops,
               100.0*double((long long)new_nops-(long long)old_nops)/double(old_nops));
+        if (m_textures_needed.size()) {
+            shadingcontext()->info ("Group needs textures:");
+            BOOST_FOREACH (ustring f, m_textures_needed)
+                shadingcontext()->info ("    %s", f);
+            if (m_unknown_textures_needed)
+                shadingcontext()->info ("    Also may construct texture names on the fly.");
+        }
+        if (m_userdata_needed.size()) {
+            shadingcontext()->info ("Group potentially needs userdata:");
+            BOOST_FOREACH (UserDataNeeded f, m_userdata_needed)
+                shadingcontext()->info ("    %s %s %s", f.name, f.type,
+                                        f.derivs ? "(derivs)" : "");
+        }
     }
 }
 

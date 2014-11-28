@@ -30,8 +30,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "oslexec_pvt.h"
 #include "noiseimpl.h"
-#include "dual_vec.h"
-#include "Imathx.h"
+#include "OSL/dual_vec.h"
+#include "OSL/Imathx.h"
 
 #include <OpenImageIO/fmath.h>
 
@@ -39,10 +39,6 @@ using namespace OSL;
 
 OSL_NAMESPACE_ENTER
 namespace pvt {
-
-// This symbol is strictly to force linkage of this file when building
-// static library.
-int opnoise_cpp_dummy = 1;
 
 
 
@@ -645,7 +641,7 @@ struct GenericNoise {
             GaborNoise gnoise;
             gnoise (name, result, s, sg, opt);
         } else {
-            ((ShadingContext *)sg->context)->shadingsys().error ("Unknown noise type \"%s\"", name.c_str());
+            ((ShadingContext *)sg->context)->error ("Unknown noise type \"%s\"", name.c_str());
         }
     }
 
@@ -673,7 +669,7 @@ struct GenericNoise {
             GaborNoise gnoise;
             gnoise (name, result, s, t, sg, opt);
         } else {
-            ((ShadingContext *)sg->context)->shadingsys().error ("Unknown noise type \"%s\"", name.c_str());
+            ((ShadingContext *)sg->context)->error ("Unknown noise type \"%s\"", name.c_str());
         }
     }
 };
@@ -707,7 +703,7 @@ struct GenericPNoise {
             GaborPNoise gnoise;
             gnoise (name, result, s, sp, sg, opt);
         } else {
-            ((ShadingContext *)sg->context)->shadingsys().error ("Unknown noise type \"%s\"", name.c_str());
+            ((ShadingContext *)sg->context)->error ("Unknown noise type \"%s\"", name.c_str());
         }
     }
 
@@ -730,7 +726,7 @@ struct GenericPNoise {
             GaborPNoise gnoise;
             gnoise (name, result, s, t, sp, tp, sg, opt);
         } else {
-            ((ShadingContext *)sg->context)->shadingsys().error ("Unknown noise type \"%s\"", name.c_str());
+            ((ShadingContext *)sg->context)->error ("Unknown noise type \"%s\"", name.c_str());
         }
     }
 };

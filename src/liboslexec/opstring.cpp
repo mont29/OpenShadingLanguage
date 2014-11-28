@@ -49,20 +49,16 @@ OSL_NAMESPACE_ENTER
 namespace pvt {
 
 
-// This symbol is strictly to force linkage of this file when building
-// static library.
-int opstring_cpp_dummy = 1;
-
-
 // Heavy lifting of OSL regex operations.
 OSL_SHADEOP int
-osl_regex_impl2 (OSL::ShadingContext *ctx, ustring subject_,
-                 int *results, int nresults, ustring pattern,
+osl_regex_impl2 (void *ctx_, const char *subject_,
+                 void *results, int nresults, const char *pattern,
                  int fullmatch)
 {
-    const std::string &subject (subject_.string());
+    ShadingContext *ctx = (ShadingContext *)ctx_;
+    const std::string &subject (USTR(subject_).string());
     boost::match_results<std::string::const_iterator> mresults;
-    const boost::regex &regex (ctx->find_regex (pattern));
+    const boost::regex &regex (ctx->find_regex (USTR(pattern)));
     if (nresults > 0) {
         std::string::const_iterator start = subject.begin();
         int res = fullmatch ? boost::regex_match (subject, mresults, regex)
@@ -75,7 +71,7 @@ osl_regex_impl2 (OSL::ShadingContext *ctx, ustring subject_,
                 else
                     m[r] = mresults[r/2].second - start;
             } else {
-                m[r] = pattern.length();
+                m[r] = USTR(pattern).length();
             }
         }
         return res;
@@ -108,7 +104,7 @@ osl_printf (ShaderGlobals *sg, const char* format_str, ...)
 #endif
     std::string s = Strutil::vformat (format_str, args);
     va_end (args);
-    sg->context->shadingsys().message (s);
+    sg->context->message ("%s", s);
 }
 
 
@@ -119,7 +115,7 @@ osl_error (ShaderGlobals *sg, const char* format_str, ...)
     va_start (args, format_str);
     std::string s = Strutil::vformat (format_str, args);
     va_end (args);
-    sg->context->shadingsys().error (s);
+    sg->context->error ("%s", s);
 }
 
 
@@ -131,7 +127,7 @@ osl_warning (ShaderGlobals *sg, const char* format_str, ...)
         va_start (args, format_str);
         std::string s = Strutil::vformat (format_str, args);
         va_end (args);
-        sg->context->shadingsys().warning (s);
+        sg->context->warning ("%s", s);
     }
 }
 

@@ -104,16 +104,19 @@ if (ILMBASE_CACHED_STATE AND
   endforeach ()
 endif ()
 
+
 # Generic search paths
 set (IlmBase_generic_include_paths
   ${ILMBASE_CUSTOM_INCLUDE_DIR}
   /usr/include
+  /usr/include/${CMAKE_LIBRARY_ARCHITECTURE}
   /usr/local/include
   /sw/include
   /opt/local/include)
 set (IlmBase_generic_library_paths
   ${ILMBASE_CUSTOM_LIB_DIR}
   /usr/lib
+  /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}
   /usr/local/lib
   /sw/lib
   /opt/local/lib)
@@ -142,7 +145,6 @@ list (APPEND IlmBase_library_paths ${IlmBase_generic_library_paths})
 PREFIX_FIND_INCLUDE_DIR (IlmBase
   OpenEXR/IlmBaseConfig.h IlmBase_include_paths)
 
-# If the headers were found, add its parent to the list of lib directories
 if (ILMBASE_INCLUDE_DIR)
   get_filename_component (tmp_extra_dir "${ILMBASE_INCLUDE_DIR}/../" ABSOLUTE)
   list (APPEND IlmBase_library_paths ${tmp_extra_dir})
@@ -173,6 +175,7 @@ if (ILMBASE_CUSTOM)
   endif()
   set (IlmBase_Libraries ${ILMBASE_CUSTOM_LIBRARIES})
   separate_arguments(IlmBase_Libraries)
+#else ()
 elseif (${ILMBASE_VERSION} VERSION_LESS "2.1")
   set (IlmBase_Libraries Half Iex Imath IlmThread)
 else ()
@@ -188,7 +191,6 @@ foreach (ilmbase_lib ${IlmBase_Libraries})
   PREFIX_FIND_LIB (IlmBase ${ilmbase_lib}
     IlmBase_library_paths IlmBase_libvars IlmBase_cachevars)
 endforeach ()
-
 # Create the list of variables that might need to be cleared
 set (ILMBASE_CACHED_VARS
   ILMBASE_INCLUDE_DIR ${IlmBase_cachevars}

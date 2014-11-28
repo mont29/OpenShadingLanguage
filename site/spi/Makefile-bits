@@ -3,6 +3,8 @@
 OSL_NAMESPACE ?= 'OSL_Arnold'
 OPENIMAGEIO_NAMESPACE ?= 'OpenImageIO_Arnold'
 
+MY_CMAKE_FLAGS += "-DEXTRA_CPP_DEFINITIONS=\"-DOSL_SPI=1\""
+
 ifeq (${platform}, macosx)
     MY_CMAKE_FLAGS += \
         -DBUILD_WITH_INSTALL_RPATH=1 \
@@ -12,6 +14,8 @@ ifeq (${platform}, macosx)
 	    -DCMAKE_C_COMPILER=clang \
 	    -DCMAKE_CXX_COMPILER=clang++
     endif
+    # All our Mac laptops seem to be at least SSE 4.2
+    USE_SIMD = sse4.2
 endif
 
 
@@ -20,7 +24,7 @@ ifeq ($(SP_OS), spinux1)
     platform=spinux1
     # put any gcc-4.4/spinux1 specific stuff here
     ifeq (${LLVM_DIRECTORY},)
-	LLVM_DIRECTORY := /shots/spi/home/lib/arnold/spinux1/llvm_3.3
+	LLVM_DIRECTORY := /shots/spi/home/lib/arnold/spinux1/llvm_3.4.1
     endif
 
     ifneq (,$(wildcard /usr/include/OpenEXR2))
@@ -40,6 +44,7 @@ ifeq ($(SP_OS), spinux1)
         -DLLVM_CUSTOM=1 \
 	-DLLVM_STATIC=1 \
 	-DEXTRA_OSLEXEC_LIBRARIES="/usr/lib64/libpthread.so" \
+	-DEXTRA_OSLEXEC_LIBRARIES="/usr/lib64/libcurses.so" \
         -DLLVM_VERSION=${LLVM_VERSION} \
         -DLLVM_DIRECTORY=${LLVM_DIRECTORY}
 
@@ -60,12 +65,17 @@ ifeq ($(SP_OS), spinux1)
          -DCMAKE_CXX_COMPILER=/net/soft_scratch/apps/arnold/tools/gcc-4.7.0-test/bin/g++
     endif
 
+    # Our minimal architecture for workstations and farm supports SSE 4.1
+    USE_SIMD = sse4.1
+
     ifneq (${SPCOMP2_USE_BOOSTVERS}, 1)
 	BOOSTVERS=1.51
     endif
     BOOSTVERS_SUFFIX = -${shell echo ${BOOSTVERS} | sed "s/\\./_/"}
+    CONSTRUCTED_BOOSTVERS = ${shell echo ${BOOSTVERS} | sed "s/\\./0/"}00
     MY_CMAKE_FLAGS += \
 	-DBOOST_CUSTOM=1 \
+    -DBoost_VERSION=${CONSTRUCTED_BOOSTVERS} \
 	-DBoost_INCLUDE_DIRS=/usr/include/boost_${BOOSTVERS} \
 	-DBoost_LIBRARY_DIRS=/usr/lib64/boost_${BOOSTVERS} \
 	-DBoost_LIBRARIES:STRING="/usr/lib64/boost_${BOOSTVERS}/libboost_filesystem-gcc44-mt${BOOSTVERS_SUFFIX}.so;/usr/lib64/boost_${BOOSTVERS}/libboost_filesystem-gcc44-mt${BOOSTVERS_SUFFIX}.so;/usr/lib64/boost_${BOOSTVERS}/libboost_regex-gcc44-mt${BOOSTVERS_SUFFIX}.so;/usr/lib64/boost_${BOOSTVERS}/libboost_system-gcc44-mt${BOOSTVERS_SUFFIX}.so;/usr/lib64/boost_${BOOSTVERS}/libboost_thread-gcc44-mt${BOOSTVERS_SUFFIX}.so;/usr/lib64/boost_${BOOSTVERS}/libboost_wave-gcc44-mt${BOOSTVERS_SUFFIX}.so" \

@@ -34,8 +34,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "oslcomp_pvt.h"
 
-#include "OpenImageIO/dassert.h"
-#include "OpenImageIO/strutil.h"
+#include <OpenImageIO/dassert.h>
+#include <OpenImageIO/strutil.h>
 namespace Strutil = OIIO::Strutil;
 
 
@@ -469,10 +469,7 @@ ASTassign_expression::codegen (Symbol *dest)
     if (var()->nodetype() == index_node) {
         // Assigning to an individual component or array element
         index = (ASTindex *) var().get();
-        if (typespec().is_structure())
-            dest = var()->codegen();  // for structs, we'll need this
-        else
-            dest = NULL;
+        dest = NULL;
     } else if (var()->nodetype() == structselect_node) {
         dest = var()->codegen();
     } else {
@@ -605,8 +602,7 @@ ASTassign_expression::codegen_assign_struct (StructSpec *structspec,
 
 bool
 ASTvariable_declaration::param_one_default_literal (const Symbol *sym,
-                                                    ASTNode *init,
-                                                    std::string &out)
+               ASTNode *init, std::string &out, const std::string &sep) const
 {
     // FIXME -- this only works for single values or arrays made of
     // literals.  Needs to be seriously beefed up.
@@ -623,27 +619,27 @@ ASTvariable_declaration::param_one_default_literal (const Symbol *sym,
         completed = false;
     } else if (type.is_int()) {
         if (islit && lit->typespec().is_int())
-            out += Strutil::format ("%d ", lit->intval());
+            out += Strutil::format ("%d", lit->intval());
         else {
-            out += "0 ";  // FIXME?
+            out += "0";  // FIXME?
             completed = false;
         }
     } else if (type.is_float()) {
         if (islit && lit->typespec().is_int())
-            out += Strutil::format ("%d ", lit->intval());
+            out += Strutil::format ("%d", lit->intval());
         else if (islit && lit->typespec().is_float())
-            out += Strutil::format ("%.8g ", lit->floatval());
+            out += Strutil::format ("%.8g", lit->floatval());
         else {
-            out += "0 ";  // FIXME?
+            out += "0";  // FIXME?
             completed = false;
         }
     } else if (type.is_triple()) {
         if (islit && lit->typespec().is_int()) {
             float f = lit->intval();
-            out += Strutil::format ("%.8g %.8g %.8g ", f, f, f);
+            out += Strutil::format ("%.8g%s%.8g%s%.8g", f, sep, f, sep, f);
         } else if (islit && lit->typespec().is_float()) {
             float f = lit->floatval();
-            out += Strutil::format ("%.8g %.8g %.8g ", f, f, f);
+            out += Strutil::format ("%.8g%s%.8g%s%.8g", f, sep, f, sep, f);
         } else if (init && init->typespec() == type &&
                    init->nodetype() == ASTNode::type_constructor_node) {
             ASTtype_constructor *ctr = (ASTtype_constructor *) init;
@@ -662,20 +658,24 @@ ASTvariable_declaration::param_one_default_literal (const Symbol *sym,
                 }
             }
             if (nargs == 1)
-                out += Strutil::format ("%.8g %.8g %.8g ", f[0], f[0], f[0]);
+                out += Strutil::format ("%.8g%s%.8g%s%.8g", f[0], sep, f[0], sep, f[0]);
             else
-                out += Strutil::format ("%.8g %.8g %.8g ", f[0], f[1], f[2]);
+                out += Strutil::format ("%.8g%s%.8g%s%.8g", f[0], sep, f[1], sep, f[2]);
         } else {
-            out += "0 0 0 ";
+            out += Strutil::format ("0%s0%s0", sep, sep);
             completed = false;
         }
     } else if (type.is_matrix()) {
         if (islit && lit->typespec().is_int()) {
             float f = lit->intval();
-            out += Strutil::format ("%.8g 0 0 0  0 %.8g 0 0  0 0 %.8g 0  0 0 0 %.8g ", f, f, f, f);
+            for (int c = 0; c < 16; ++c)
+               out += Strutil::format ("%.8g%s", (c/4)==(c%4) ? f : 0.0f,
+                                       c<15 ? sep.c_str() : "");
         } else if (islit && lit->typespec().is_float()) {
             float f = lit->floatval();
-            out += Strutil::format ("%.8g 0 0 0  0 %.8g 0 0  0 0 %.8g 0  0 0 0 %.8g ", f, f, f, f);
+            for (int c = 0; c < 16; ++c)
+               out += Strutil::format ("%.8g%s", (c/4)==(c%4) ? f : 0.0f,
+                                       c<15 ? sep.c_str() : "");
         } else if (init && init->typespec() == type &&
                    init->nodetype() == ASTNode::type_constructor_node) {
             ASTtype_constructor *ctr = (ASTtype_constructor *) init;
@@ -695,23 +695,24 @@ ASTvariable_declaration::param_one_default_literal (const Symbol *sym,
                     completed = false;
                 }
             }
-            if (nargs == 1)
-                out += Strutil::format ("%.8g 0 0 0  0 %.8g 0 0  0 0 %.8g 0  0 0 0 %.8g ",
-                                        f[0], f[0], f[0], f[0]);
-            else
-                out += Strutil::format ("%.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g ",
-                                        f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7])
-                     + Strutil::format ("%.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g",
-                                        f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+            if (nargs == 1) {
+                for (int c = 0; c < 16; ++c)
+                   out += Strutil::format ("%.8g%s", (c/4)==(c%4) ? f[0] : 0.0f,
+                                           c<15 ? sep.c_str() : "");
+            } else {
+                for (int c = 0; c < 16; ++c)
+                    out += Strutil::format ("%.8g%s", f[c], c<15 ? sep.c_str() : "");
+            }
         } else {
-            out += "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+            for (int c = 0; c < 16; ++c)
+                out += Strutil::format ("0%s", c<15 ? sep.c_str() : "");
             completed = false;
         }
     } else if (type.is_string()) {
         if (islit && lit->typespec().is_string())
-            out += Strutil::format ("\"%s\" ", lit->strval());
+            out += Strutil::format ("\"%s\"", Strutil::escape_chars(lit->strval()));
         else {
-            out += "\"\" ";  // FIXME?
+            out += "\"\"";  // FIXME?
             completed = false;
         }
     }
@@ -724,7 +725,8 @@ ASTvariable_declaration::param_one_default_literal (const Symbol *sym,
 
 
 bool
-ASTvariable_declaration::param_default_literals (const Symbol *sym, std::string &out)
+ASTvariable_declaration::param_default_literals (const Symbol *sym,
+                             std::string &out, const std::string &separator) const
 {
     out.clear ();
 
@@ -736,8 +738,12 @@ ASTvariable_declaration::param_default_literals (const Symbol *sym, std::string 
         if (init->nodetype() == compound_initializer_node)
             init = ((ASTcompound_initializer *)init.get())->initlist();
         bool completed = true;  // have we output the full initialization?
-        for (ASTNode::ref i = init;  i;  i = i->next())
-            completed &= param_one_default_literal (sym, i.get(), out);
+        int i = 0;
+        for (ASTNode::ref n = init;  n;  n = n->next(), ++i) {
+            if (i)
+                out += separator;
+            completed &= param_one_default_literal (sym, n.get(), out, separator);
+        }
         return completed;
     }
 
@@ -872,7 +878,8 @@ ASTvariable_declaration::codegen_initlist (ref init, TypeSpec type,
 Symbol *
 ASTvariable_declaration::codegen_struct_initializers (ref init)
 {
-    if (! init->next() && init->typespec() == m_typespec) {
+    if (! init->next() && init->typespec() == m_typespec &&
+            init->nodetype() != compound_initializer_node) {
         // Special case: just one initializer, it's a whole struct of
         // the right type.
         Symbol *initsym = init->codegen (m_sym);
@@ -1280,7 +1287,12 @@ ASTunary_expression::codegen (Symbol *dest)
     if (dest == NULL || ! equivalent (dest->typespec(), typespec()))
         dest = m_compiler->make_temporary (typespec());
 
-    // FIXME -- what about coerced types, do we need a temp and copy here?
+    // Negation of closures: turn into multiplication by -1.0
+    if (esym->typespec().is_closure()) {
+        ASSERT (m_op == Sub);
+        emitcode ("mul", dest, esym, m_compiler->make_constant (-1.0f));
+        return dest;
+    }
 
     // Generate the opcode
     emitcode (opword(), dest, esym);
@@ -1574,9 +1586,9 @@ ASTfunction_call::codegen (Symbol *dest)
         for (int i = 0;  a;  a = a->nextptr(), form = form->nextptr(), ++i) {
             ASTvariable_declaration *f = (ASTvariable_declaration *) form;
             const TypeSpec &ftype (f->sym()->typespec());
-            // If the formal parameter is a struct, we also need to alias
-            // each of the fields
             if (ftype.is_structure() || ftype.is_structure_array()) {
+                // If the formal parameter is a struct, we also need to
+                // alias each of the fields
                 if (a->nodetype() == variable_ref_node) {
                     // Passed a variable that is a struct ; make the struct
                     // fields of the formal param alias to the struct fields
@@ -1603,9 +1615,8 @@ ASTfunction_call::codegen (Symbol *dest)
                 } else {
                     ASSERT (0 && "unhandled structure designation");
                 }
-            } else {
-                f->sym()->alias (argdest[i]);
             }
+            f->sym()->alias (argdest[i]);
         }
 
         // Return statements inside the middle of a function (not the

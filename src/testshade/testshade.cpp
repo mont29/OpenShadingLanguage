@@ -33,14 +33,18 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <vector>
 #include <cmath>
 
+#include <boost/foreach.hpp>
+
 #include <OpenImageIO/imageio.h>
 #include <OpenImageIO/imagebuf.h>
 #include <OpenImageIO/imagebufalgo.h>
+#include <OpenImageIO/imagebufalgo_util.h>
 #include <OpenImageIO/argparse.h>
 #include <OpenImageIO/strutil.h>
 #include <OpenImageIO/timer.h>
 
-#include "oslexec.h"
+#include "OSL/oslexec.h"
+#include "OSL/oslquery.h"
 #include "simplerend.h"
 using namespace OSL;
 using OIIO::TypeDesc;
@@ -58,11 +62,17 @@ static bool debug = false;
 static bool debug2 = false;
 static bool verbose = false;
 static bool stats = false;
+static bool profile = false;
 static bool O0 = false, O1 = false, O2 = false;
 static bool pixelcenters = false;
 static bool debugnan = false;
 static bool debug_uninit = false;
+static bool use_group_outputs = false;
+static bool do_oslquery = false;
 static int xres = 1, yres = 1;
+static int num_threads = 0;
+static std::string groupname;
+static std::string groupspec;
 static std::string layername;
 static std::vector<std::string> connections;
 static ParamValueList params;
@@ -71,10 +81,13 @@ static std::string reparam_layer;
 static ErrorHandler errhandler;
 static int iters = 1;
 static std::string raytype = "camera";
+static int raytype_bit = 0;
 static std::string extraoptions;
 static SimpleRenderer rend;  // RendererServices
 static OSL::Matrix44 Mshad;  // "shader" space to "common" space matrix
 static OSL::Matrix44 Mobj;   // "object" space to "common" space matrix
+static ShaderGroupRef shadergroup;
+static std::string archivegroup;
 
 
 static void
@@ -93,6 +106,7 @@ static int
 add_shader (int argc, const char *argv[])
 {
     shadingsys->attribute ("debug", debug2 ? 2 : (debug ? 1 : 0));
+    shadingsys->attribute ("compile_report", debug|debug2);
     const char *opt_env = getenv ("TESTSHADE_OPT");  // overrides opt
     if (opt_env)
         shadingsys->attribute ("optimize", atoi(opt_env));
@@ -219,6 +233,18 @@ action_reparam (int argc, const char *argv[])
 
 
 static void
+action_groupspec (int argc, const char *argv[])
+{
+    shadingsys->ShaderGroupEnd ();
+    if (verbose)
+        std::cout << "Processing group specification:\n---\n"
+                  << argv[1] << "\n---\n";
+    shadergroup = shadingsys->ShaderGroupBegin (groupname, "surface", argv[1]);
+}
+
+
+
+static void
 getargs (int argc, const char *argv[])
 {
     static bool help = false;
@@ -227,14 +253,17 @@ getargs (int argc, const char *argv[])
                 "%*", add_shader, "",
                 "--help", &help, "Print help message",
                 "-v", &verbose, "Verbose messages",
+                "-t %d", &num_threads, "Render using N threads (default: auto-detect)",
                 "--debug", &debug, "Lots of debugging info",
                 "--debug2", &debug2, "Even more debugging info",
                 "--stats", &stats, "Print run statistics",
+                "--profile", &profile, "Print profile information",
                 "-g %d %d", &xres, &yres, "Make an X x Y grid of shading points",
                 "-o %L %L", &outputvars, &outputfiles,
                         "Output (variable, filename)",
                 "-od %s", &dataformatname, "Set the output data format to one of: "
                         "uint8, half, float",
+                "--groupname %s", &groupname, "Set shader group name",
                 "--layer %s", &layername, "Set next layer name",
                 "--param %@ %s %s", &action_param, NULL, NULL,
                         "Add a parameter (args: name value) (options: type=%s, lockgeom=%d)",
@@ -243,6 +272,10 @@ getargs (int argc, const char *argv[])
                     "Connect fromlayer fromoutput tolayer toinput",
                 "--reparam %@ %s %s %s", &action_reparam, NULL, NULL, NULL,
                         "Change a parameter (args: layername paramname value) (options: type=%s)",
+                "--group %@ %s", &action_groupspec, &groupspec,
+                        "Specify a full group command",
+                "--archivegroup %s", &archivegroup,
+                        "Archive the group to a given filename",
                 "--raytype %s", &raytype, "Set the raytype",
                 "--iters %d", &iters, "Number of iterations",
                 "-O0", &O0, "Do no runtime shader optimization",
@@ -252,9 +285,11 @@ getargs (int argc, const char *argv[])
                 "--debugnan", &debugnan, "Turn on 'debug_nan' mode",
                 "--debuguninit", &debug_uninit, "Turn on 'debug_uninit' mode",
                 "--options %s", &extraoptions, "Set extra OSL options",
+                "--groupoutputs", &use_group_outputs, "Specify group outputs, not global outputs",
+                "--oslquery", &do_oslquery, "Test OSLQuery at runtime",
 //                "-v", &verbose, "Verbose output",
                 NULL);
-    if (ap.parse(argc, argv) < 0 || shadernames.empty()) {
+    if (ap.parse(argc, argv) < 0 || (shadernames.empty() && groupspec.empty())) {
         std::cerr << ap.geterror() << std::endl;
         ap.usage ();
         exit (EXIT_FAILURE);
@@ -269,6 +304,7 @@ getargs (int argc, const char *argv[])
 
     if (debug || verbose)
         errhandler.verbosity (ErrorHandler::VERBOSE);
+    raytype_bit = shadingsys->raytype_bit (ustring (raytype));
 }
 
 
@@ -318,6 +354,10 @@ setup_shaderglobals (ShaderGlobals &sg, ShadingSystem *shadingsys,
     // Just zero the whole thing out to start
     memset(&sg, 0, sizeof(ShaderGlobals));
 
+    // In our SimpleRenderer, the "renderstate" itself just a pointer to
+    // the ShaderGlobals.
+    sg.renderstate = &sg;
+
     // Set "shader" space to be Mshad.  In a real renderer, this may be
     // different for each shader group.
     sg.shader2common = OSL::TransformationPtr (&Mshad);
@@ -327,7 +367,7 @@ setup_shaderglobals (ShaderGlobals &sg, ShadingSystem *shadingsys,
     sg.object2common = OSL::TransformationPtr (&Mobj);
 
     // Just make it look like all shades are the result of 'raytype' rays.
-    sg.raytype = shadingsys->raytype_bit (ustring(raytype));
+    sg.raytype = raytype_bit;
 
     // Set up u,v to vary across the "patch", and also their derivatives.
     // Note that since u & x, and v & y are aligned, we only need to set
@@ -379,9 +419,12 @@ setup_output_images (ShadingSystem *shadingsys,
         std::vector<const char *> aovnames (outputvars.size());
         for (size_t i = 0; i < outputvars.size(); ++i)
             aovnames[i] = outputvars[i].c_str();
-        shadingsys->attribute ("renderer_outputs",
+        shadingsys->attribute (use_group_outputs ? shadergroup.get() : NULL,
+                               "renderer_outputs",
                                TypeDesc(TypeDesc::STRING,(int)aovnames.size()),
                                &aovnames[0]);
+        if (use_group_outputs)
+            std::cout << "Marking group outputs, not global renderer outputs.\n";
     }
 
     if (extraoptions.size())
@@ -489,6 +532,136 @@ save_outputs (ShadingSystem *shadingsys, ShadingContext *ctx, int x, int y)
 
 
 
+static void
+test_group_attributes (ShaderGroup *group)
+{
+    int nt = 0;
+    if (shadingsys->getattribute (group, "num_textures_needed", nt)) {
+        std::cout << "Need " << nt << " textures:\n";
+        ustring *tex = NULL;
+        shadingsys->getattribute (group, "textures_needed",
+                                  TypeDesc::PTR, &tex);
+        for (int i = 0; i < nt; ++i)
+            std::cout << "    " << tex[i] << "\n";
+        int unk = 0;
+        shadingsys->getattribute (group, "unknown_textures_needed", unk);
+        if (unk)
+            std::cout << "    and unknown textures\n";
+    }
+    int nclosures = 0;
+    if (shadingsys->getattribute (group, "num_closures_needed", nclosures)) {
+        std::cout << "Need " << nclosures << " closures:\n";
+        ustring *closures = NULL;
+        shadingsys->getattribute (group, "closures_needed",
+                                  TypeDesc::PTR, &closures);
+        for (int i = 0; i < nclosures; ++i)
+            std::cout << "    " << closures[i] << "\n";
+        int unk = 0;
+        shadingsys->getattribute (group, "unknown_closures_needed", unk);
+        if (unk)
+            std::cout << "    and unknown closures\n";
+    }
+    int nglobals = 0;
+    if (shadingsys->getattribute (group, "num_globals_needed", nglobals)) {
+        std::cout << "Need " << nglobals << " globals:\n";
+        ustring *globals = NULL;
+        shadingsys->getattribute (group, "globals_needed",
+                                  TypeDesc::PTR, &globals);
+        for (int i = 0; i < nglobals; ++i)
+            std::cout << "    " << globals[i] << "\n";
+    }
+    int nuser = 0;
+    if (shadingsys->getattribute (group, "num_userdata", nuser) && nuser) {
+        std::cout << "Need " << nuser << " user data items:\n";
+        ustring *userdata_names = NULL;
+        TypeDesc *userdata_types = NULL;
+        int *userdata_offsets = NULL;
+        bool *userdata_derivs = NULL;
+        shadingsys->getattribute (group, "userdata_names",
+                                  TypeDesc::PTR, &userdata_names);
+        shadingsys->getattribute (group, "userdata_types",
+                                  TypeDesc::PTR, &userdata_types);
+        shadingsys->getattribute (group, "userdata_offsets",
+                                  TypeDesc::PTR, &userdata_offsets);
+        shadingsys->getattribute (group, "userdata_derivs",
+                                  TypeDesc::PTR, &userdata_derivs);
+        DASSERT (userdata_names && userdata_types && userdata_offsets);
+        for (int i = 0; i < nuser; ++i)
+            std::cout << "    " << userdata_names[i] << ' '
+                      << userdata_types[i] << "  offset="
+                      << userdata_offsets[i] << " deriv="
+                      << userdata_derivs[i] << "\n";
+    }
+}
+
+
+
+static void
+shade_region (ShaderGroup *shadergroup, OIIO::ROI roi, bool save)
+{
+    // Optional: high-performance apps may request this thread-specific
+    // pointer in order to save a bit of time on each shade.  Just like
+    // the name implies, a multithreaded renderer would need to do this
+    // separately for each thread, and be careful to always use the same
+    // thread_info each time for that thread.
+    //
+    // There's nothing wrong with a simpler app just passing NULL for
+    // the thread_info; in such a case, the ShadingSystem will do the
+    // necessary calls to find the thread-specific pointer itself, but
+    // this will degrade performance just a bit.
+    OSL::PerThreadInfo *thread_info = shadingsys->create_thread_info();
+
+    // Request a shading context so that we can execute the shader.
+    // We could get_context/release_constext for each shading point,
+    // but to save overhead, it's more efficient to reuse a context
+    // within a thread.
+    ShadingContext *ctx = shadingsys->get_context (thread_info);
+
+    // Set up shader globals and a little test grid of points to shade.
+    ShaderGlobals shaderglobals;
+
+    // Loop over all pixels in the image (in x and y)...
+    for (int y = roi.ybegin;  y < roi.yend;  ++y) {
+        for (int x = roi.xbegin;  x < roi.xend;  ++x) {
+            // In a real renderer, this is where you would figure
+            // out what object point is visible in this pixel (or
+            // this sample, for antialiasing).  Once determined,
+            // you'd set up a ShaderGlobals that contained the vital
+            // information about that point, such as its location,
+            // the normal there, the u and v coordinates on the
+            // surface, the transformation of that object, and so
+            // on.  
+            //
+            // This test app is not a real renderer, so we just
+            // set it up rigged to look like we're rendering a single
+            // quadrilateral that exactly fills the viewport, and that
+            // setup is done in the following function call:
+            setup_shaderglobals (shaderglobals, shadingsys, x, y);
+
+            // Actually run the shader for this point
+            shadingsys->execute (*ctx, *shadergroup, shaderglobals);
+
+            // Save all the designated outputs.  But only do so if we
+            // are on the last iteration requested, so that if we are
+            // doing a bunch of iterations for time trials, we only
+            // including the output pixel copying once in the timing.
+            if (save)
+                save_outputs (shadingsys, ctx, x, y);
+        }
+    }
+
+    // We're done shading with this context.
+    shadingsys->release_context (ctx);
+
+    // Now that we're done rendering, release the thread=specific
+    // pointer we saved.  A simple app could skip this; but if the app
+    // asks for it (as we have in this example), then it should also
+    // destroy it when done with it.
+    shadingsys->destroy_thread_info(thread_info);
+}
+
+
+
 extern "C" int
 test_shade (int argc, const char *argv[])
 {
@@ -498,7 +671,12 @@ test_shade (int argc, const char *argv[])
     // object that services callbacks from the shading system, NULL for
     // the TextureSystem (that just makes 'create' make its own TS), and
     // an error handler.
-    shadingsys = ShadingSystem::create (&rend, NULL, &errhandler);
+    shadingsys = new ShadingSystem (&rend, NULL, &errhandler);
+
+    // Register the layout of all closures known to this renderer
+    // Any closure used by the shader which is not registered, or
+    // registered with a different number of arguments will lead
+    // to a runtime error.
     register_closures(shadingsys);
 
     // Remember that each shader parameter may optionally have a
@@ -545,11 +723,16 @@ test_shade (int argc, const char *argv[])
     // to be processed at the end.  Bear with us.
     
     // Start the shader group and grab a reference to it.
-    ShaderGroupRef shadergroup = shadingsys->ShaderGroupBegin ();
+    shadergroup = shadingsys->ShaderGroupBegin ();
 
     // Get the command line arguments.  That will set up all the shader
     // instances and their parameters for the group.
     getargs (argc, argv);
+
+    if (! shadergroup) {
+        std::cerr << "ERROR: Invalid shader group. Exiting testshade.\n";
+        return EXIT_FAILURE;
+    }
 
     // Now set up the connections
     for (size_t i = 0;  i < connections.size();  i += 4) {
@@ -568,6 +751,39 @@ test_shade (int argc, const char *argv[])
     // End the group
     shadingsys->ShaderGroupEnd ();
 
+    if (verbose || do_oslquery) {
+        std::string pickle;
+        shadingsys->getattribute (shadergroup.get(), "pickle", pickle);
+        std::cout << "Shader group:\n---\n" << pickle << "\n---\n";
+        std::cout << "\n";
+        ustring groupname;
+        shadingsys->getattribute (shadergroup.get(), "groupname", groupname);
+        std::cout << "Shader group \"" << groupname << "\" layers are:\n";
+        int num_layers = 0;
+        shadingsys->getattribute (shadergroup.get(), "num_layers", num_layers);
+        if (num_layers > 0) {
+            std::vector<const char *> layers (size_t(num_layers), NULL);
+            shadingsys->getattribute (shadergroup.get(), "layer_names",
+                                      TypeDesc(TypeDesc::STRING, num_layers),
+                                      &layers[0]);
+            for (int i = 0; i < num_layers; ++i) {
+                std::cout << "    " << (layers[i] ? layers[i] : "<unnamed>") << "\n";
+                if (do_oslquery) {
+                    OSLQuery q;
+                    q.init (shadergroup.get(), i);
+                    for (size_t p = 0;  p < q.nparams(); ++p) {
+                        const OSLQuery::Parameter *param = q.getparam(p);
+                        std::cout << "\t" << (param->isoutput ? "output "  : "")
+                                  << param->type << ' ' << param->name << "\n";
+                    }
+                }
+            }
+        }
+        std::cout << "\n";
+    }
+    if (archivegroup.size())
+        shadingsys->archive_shadergroup (shadergroup.get(), archivegroup);
+
     if (outputfiles.size() != 0)
         std::cout << "\n";
 
@@ -581,65 +797,30 @@ test_shade (int argc, const char *argv[])
     // Set up the image outputs requested on the command line
     setup_output_images (shadingsys, shadergroup);
 
-    // Set up shader globals and a little test grid of points to shade.
-    ShaderGlobals shaderglobals;
+    if (debug)
+        test_group_attributes (shadergroup.get());
+    if (profile)
+        shadingsys->attribute ("profile", 1);
+
+    if (num_threads < 1)
+        num_threads = boost::thread::hardware_concurrency();
 
     double setuptime = timer.lap ();
-
-    // Optional: high-performance apps may request this thread-specific
-    // pointer in order to save a bit of time on each shade.  Just like
-    // the name implies, a multithreaded renderer would need to do this
-    // separately for each thread, and be careful to always use the same
-    // thread_info each time for that thread.
-    //
-    // There's nothing wrong with a simpler app just passing NULL for
-    // the thread_info; in such a case, the ShadingSystem will do the
-    // necessary calls to find the thread-specific pointer itself, but
-    // this will degrade performance just a bit.
-    OSL::PerThreadInfo *thread_info = shadingsys->create_thread_info();
-
-    // Request a shading context so that we can execute the shader.
-    // We could get_context/release_constext for each shading point,
-    // but to save overhead, it's more efficient to reuse a context
-    // within a thread.
-    ShadingContext *ctx = shadingsys->get_context (thread_info);
 
     // Allow a settable number of iterations to "render" the whole image,
     // which is useful for time trials of things that would be too quick
     // to accurately time for a single iteration
     for (int iter = 0;  iter < iters;  ++iter) {
+        OIIO::ROI roi (0, xres, 0, yres);
+        bool save = (iter == (iters-1));   // save on last iteration
 
-        // Loop over all pixels in the image (in x and y)...
-        for (int y = 0, n = 0;  y < yres;  ++y) {
-            for (int x = 0;  x < xres;  ++x, ++n) {
-
-                // In a real renderer, this is where you would figure
-                // out what object point is visible in this pixel (or
-                // this sample, for antialiasing).  Once determined,
-                // you'd set up a ShaderGlobals that contained the vital
-                // information about that point, such as its location,
-                // the normal there, the u and v coordinates on the
-                // surface, the transformation of that object, and so
-                // on.  
-                //
-                // This test app is not a real renderer, so we just
-                // set it up rigged to look like we're rendering a single
-                // quadrilateral that exactly fills the viewport, and that
-                // setup is done in the following function call:
-                setup_shaderglobals (shaderglobals, shadingsys, x, y);
-
-                // Actually run the shader for this point
-                shadingsys->execute (*ctx, *shadergroup, shaderglobals);
-
-                // Save all the designated outputs.  But only do so if we
-                // are on the last iteration requested, so that if we are
-                // doing a bunch of iterations for time trials, we only
-                // including the output pixel copying once in the timing.
-                if (iter == (iters - 1)) {
-                    save_outputs (shadingsys, ctx, x, y);
-                }
-            }
-        }
+#if 0
+        shade_region (shadergroup.get(), roi, save);
+#else
+        OIIO::ImageBufAlgo::parallel_image (
+            boost::bind (shade_region, shadergroup.get(), _1, save),
+            roi, num_threads);
+#endif
 
         // If any reparam was requested, do it now
         if (reparams.size() && reparam_layer.size()) {
@@ -651,15 +832,6 @@ test_shade (int argc, const char *argv[])
             }
         }
     }
-
-    // We're done shading with this context.
-    shadingsys->release_context (ctx);
-
-    // Now that we're done rendering, release the thread=specific
-    // pointer we saved.  A simple app could skip this; but if the app
-    // asks for it (as we have in this example), then it should also
-    // destroy it when done with it.
-    shadingsys->destroy_thread_info(thread_info);
 
     if (outputfiles.size() == 0)
         std::cout << "\n";
@@ -674,17 +846,22 @@ test_shade (int argc, const char *argv[])
     }
 
     // Print some debugging info
-    if (debug || stats) {
+    if (debug || stats || profile) {
         double runtime = timer.lap();
         std::cout << "\n";
         std::cout << "Setup: " << OIIO::Strutil::timeintervalformat (setuptime,2) << "\n";
         std::cout << "Run  : " << OIIO::Strutil::timeintervalformat (runtime,2) << "\n";
         std::cout << "\n";
         std::cout << shadingsys->getstats (5) << "\n";
+        OIIO::TextureSystem *texturesys = shadingsys->texturesys();
+        if (texturesys)
+            std::cout << texturesys->getstats (5) << "\n";
+        std::cout << ustring::getstats() << "\n";
     }
 
     // We're done with the shading system now, destroy it
-    ShadingSystem::destroy (shadingsys);
+    shadergroup.reset ();  // Must release this before destroying shadingsys
+    delete shadingsys;
 
     return EXIT_SUCCESS;
 }

@@ -102,6 +102,7 @@ OSL_NAMESPACE_EXIT
 %type <i> arguments_opt arguments argument
 %type <i> jumptargets_opt jumptargets jumptarget
 %type <i> hints_opt hints hint
+%type <s> hintcontents hintcontents_opt hintcontents_item
 
 // Define the starting nonterminal
 %start oso_file
@@ -191,7 +192,11 @@ symbol
                         typespec.make_array ($3);
                     OSOReader::osoreader->symbol ((SymType)$1, typespec, $4);
                 }
-            initial_values_opt hints_opt ENDOFLINE
+            initial_values_opt hints_opt
+                {
+                    OSOReader::osoreader->parameter_done ();
+                }
+            ENDOFLINE
         | ENDOFLINE
         ;
 
@@ -315,10 +320,48 @@ hints
         ;
 
 hint
-        : HINT
+        : HINT hintcontents_opt
                 {
-                    OSOReader::osoreader->hint ($1);
+                    if ($2) {
+                        ustring h = ustring::format("%s{%s}", $1, $2);
+                        OSOReader::osoreader->hint (h.c_str());
+                    }
+                    else
+                        OSOReader::osoreader->hint ($1);
                 }
+        ;
+
+hintcontents_opt
+        : '{' hintcontents '}'      { $$ = $2; }
+        | /* empty */               { $$ = NULL; }
+        ;
+
+hintcontents
+        : hintcontents_item
+        | hintcontents ',' hintcontents_item
+                {
+                    $$ = ustring::format("%s,%s", $1, $3).c_str();
+                }
+        | /* empty */    { $$ = ""; }
+        ;
+
+hintcontents_item
+        : INT_LITERAL       { $$ = ustring::format("%d", $1).c_str(); }
+        | FLOAT_LITERAL     { $$ = ustring::format("%.8f", $1).c_str(); }
+        | STRING_LITERAL
+            {
+                $$ = ustring::format("\"%s\"", OIIO::Strutil::escape_chars($1)).c_str();
+            }
+        | IDENTIFIER arraylen_opt
+            {
+                $$ = $2 ? ustring::format("%s[%d]", $1, $2).c_str() : $1;
+            }
+        | simple_typename arraylen_opt
+            {
+                TypeDesc t = osolextype ($1);
+                t.arraylen = $2;
+                $$ = t.c_str();
+            }
         ;
 
 %%
@@ -328,9 +371,7 @@ hint
 void
 yyerror (const char *err)
 {
-//    oslcompiler->error (oslcompiler->filename(), oslcompiler->lineno(),
-//                        "Syntax error: %s", err);
-    fprintf (stderr, "Error, line %d: %s", 
+    OSOReader::osoreader->errhandler().error ("Error, line %d: %s", 
              OSOReader::osoreader->lineno(), err);
 }
 
@@ -353,6 +394,6 @@ OSL::pvt::osolextype (int lex)
     case STRINGTYPE : return TypeDesc::TypeString;
     case VECTORTYPE : return TypeDesc::TypeVector;
     case VOIDTYPE   : return TypeDesc::NONE;
-    default: return PT_UNKNOWN;
+    default: return TypeDesc::UNKNOWN;
     }
 }

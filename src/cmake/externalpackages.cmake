@@ -1,7 +1,7 @@
 ###########################################################################
 # Find libraries
 
-setup_path (THIRD_PARTY_TOOLS_HOME 
+setup_path (THIRD_PARTY_TOOLS_HOME
             "unknown"
             "Location of third party libraries in the external project")
 
@@ -23,7 +23,7 @@ if (THIRD_PARTY_TOOLS_HOME AND EXISTS "${THIRD_PARTY_TOOLS_HOME}")
 endif ()
 
 
-setup_string (SPECIAL_COMPILE_FLAGS "" 
+setup_string (SPECIAL_COMPILE_FLAGS ""
                "Custom compilation flags")
 if (SPECIAL_COMPILE_FLAGS)
     add_definitions (${SPECIAL_COMPILE_FLAGS})
@@ -37,7 +37,6 @@ endif ()
 find_package (IlmBase REQUIRED)
 
 include_directories ("${ILMBASE_INCLUDE_DIR}")
-include_directories ("${ILMBASE_INCLUDE_DIR}/OpenEXR")
 
 macro (LINK_ILMBASE target)
     target_link_libraries (${target} ${ILMBASE_LIBRARIES})
@@ -53,8 +52,8 @@ endmacro ()
 message (STATUS "BOOST_ROOT ${BOOST_ROOT}")
 
 if (NOT DEFINED Boost_ADDITIONAL_VERSIONS)
-  set (Boost_ADDITIONAL_VERSIONS "1.54" "1.53" "1.52" "1.51" "1.50"
-                                 "1.49" "1.48" "1.47" "1.46" "1.45" "1.44" 
+  set (Boost_ADDITIONAL_VERSIONS "1.55" "1.54" "1.53" "1.52" "1.51" "1.50"
+                                 "1.49" "1.48" "1.47" "1.46" "1.45" "1.44"
                                  "1.43" "1.43.0" "1.42" "1.42.0")
 endif ()
 if (LINKSTATIC)
@@ -71,9 +70,15 @@ else ()
         list (APPEND Boost_COMPONENTS wave)
     endif ()
 
-    find_package (Boost 1.42 REQUIRED 
+    find_package (Boost 1.42 REQUIRED
                   COMPONENTS ${Boost_COMPONENTS}
                  )
+
+endif ()
+
+# On Linux, Boost 1.55 and higher seems to need to link against -lrt
+if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND ${Boost_VERSION} GREATER 105499)
+    list (APPEND Boost_LIBRARIES "rt")
 endif ()
 
 if (VERBOSE)
@@ -174,11 +179,21 @@ endif()
 find_library ( LLVM_LIBRARY
                NAMES LLVM-${LLVM_VERSION}
                PATHS ${LLVM_LIB_DIR})
+message (STATUS "LLVM version  = ${LLVM_VERSION}")
+message (STATUS "LLVM dir      = ${LLVM_DIRECTORY}")
+
+if (USE_MCJIT)
+    find_library ( LLVM_MCJIT_LIBRARY
+                   NAMES LLVMMCJIT
+                   PATHS ${LLVM_LIB_DIR})
+else ()
+    set (LLVM_MCJIT_LIBRARY "")
+endif ()
+
 if (VERBOSE)
-    message (STATUS "LLVM version  = ${LLVM_VERSION}")
-    message (STATUS "LLVM dir      = ${LLVM_DIRECTORY}")
     message (STATUS "LLVM includes = ${LLVM_INCLUDES}")
     message (STATUS "LLVM library  = ${LLVM_LIBRARY}")
+    message (STATUS "LLVM MCJIT library  = ${LLVM_MCJIT_LIBRARY}")
     message (STATUS "LLVM lib dir  = ${LLVM_LIB_DIR}")
 endif ()
 

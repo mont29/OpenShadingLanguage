@@ -28,12 +28,23 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <cmath>
 
+#include <boost/unordered_map.hpp>
+
 #include <OpenImageIO/timer.h>
 #include <OpenImageIO/sysutil.h>
+#include <OpenImageIO/filesystem.h>
+#include <OpenImageIO/strutil.h>
+#include <OpenImageIO/fmath.h>
 
 #include "oslexec_pvt.h"
 #include "../liboslcomp/oslcomp_pvt.h"
 #include "backendllvm.h"
+
+// Create extrenal declarations for all built-in funcs we may call from LLVM
+#define DECL(name,signature) extern "C" void name();
+#include "builtindecl.h"
+#undef DECL
+
 
 /*
 This whole file is concerned with taking our post-optimized OSO
@@ -45,8 +56,15 @@ Schematically, we want to create code that resembles the following:
 
     // Assume 2 layers. 
     struct GroupData_1 {
-        // Array of ints telling if we have already run each layer
-        int layer_run[nlayers];
+        // Array telling if we have already run each layer
+        char layer_run[nlayers];
+        // Array telling if we have already initialized each
+        // needed user data (0 = haven't checked, 1 = checked and there
+        // was no userdata, 2 = checked and there was userdata)
+        char userdata_initialized[num_userdata];
+        // All the user data slots, in order
+        float userdata_s;
+        float userdata_t;
         // For each layer in the group, we declare all shader params
         // whose values are not known -- they have init ops, or are
         // interpolated from the geom, or are connected to other layers.
@@ -57,11 +75,6 @@ Schematically, we want to create code that resembles the following:
     // Name of layer entry is $layer_ID
     void $layer_0 (ShaderGlobals *sg, GroupData_1 *group)
     {
-        // Only run if not already done.  Then mark as run.
-        if (group->layer_run[0])
-            return;
-        group->layer_run[0] = 1;
-
         // Declare locals, temps, constants, params with known values.
         // Make them all look like stack memory locations:
         float *x = alloca (sizeof(float));
@@ -74,11 +87,12 @@ Schematically, we want to create code that resembles the following:
 
     void $layer_1 (ShaderGlobals *sg, GroupData_1 *group)
     {
-        if (group->layer_run[1])
-            return;
-        group->layer_run[1] = 1;
-        // ...
-        $layer_0 (sg, group);    // because we need its outputs
+        // Because we need the outputs of layer 0 now, we call it if it
+        // hasn't already run:
+        if (! group->layer_run[0]) {
+            group->layer_run[0] = 1;
+            $layer_0 (sg, group);    // because we need its outputs
+        }
         *y = sg->u * group->$param_1_bar;
     }
 
@@ -86,7 +100,11 @@ Schematically, we want to create code that resembles the following:
     {
         group->layer_run[...] = 0;
         // Run just the unconditional layers
-        $layer_1 (sg, group);
+
+        if (! group->layer_run[1]) {
+            group->layer_run[1] = 1;
+            $layer_1 (sg, group);
+        }
     }
 
 */
@@ -109,395 +127,46 @@ static ustring op_compassign("compassign");
 static ustring op_aref("aref");
 static ustring op_compref("compref");
 
-// Trickery to force linkage of files when building static libraries.
-extern int opclosure_cpp_dummy, opcolor_cpp_dummy;
-extern int opmessage_cpp_dummy, opnoise_cpp_dummy;
-extern int opspline_cpp_dummy, opstring_cpp_dummy;
-#ifdef OSL_LLVM_NO_BITCODE
-extern int llvm_ops_cpp_dummy;
-#endif
-int *force_osl_op_linkage[] = {
-    &opclosure_cpp_dummy, &opcolor_cpp_dummy, &opmessage_cpp_dummy,
-    &opnoise_cpp_dummy, &opspline_cpp_dummy,  &opstring_cpp_dummy,
-#ifdef OSL_LLVM_NO_BITCODE
-    &llvm_ops_cpp_dummy
-#endif
+
+struct HelperFuncRecord {
+    const char *argtypes;
+    void (*function)();
+    HelperFuncRecord (const char *argtypes=NULL, void (*function)()=NULL)
+        : argtypes(argtypes), function(function) {}
 };
 
-
-#define NOISE_IMPL(name)                        \
-    "osl_" #name "_ff",  "ff",                  \
-    "osl_" #name "_fff", "fff",                 \
-    "osl_" #name "_fv",  "fv",                  \
-    "osl_" #name "_fvf", "fvf",                 \
-    "osl_" #name "_vf",  "xvf",                 \
-    "osl_" #name "_vff", "xvff",                \
-    "osl_" #name "_vv",  "xvv",                 \
-    "osl_" #name "_vvf", "xvvf"
-
-#define NOISE_DERIV_IMPL(name)                  \
-    "osl_" #name "_dfdf",   "xXX",              \
-    "osl_" #name "_dfdff",  "xXXf",             \
-    "osl_" #name "_dffdf",  "xXfX",             \
-    "osl_" #name "_dfdfdf", "xXXX",             \
-    "osl_" #name "_dfdv",   "xXv",              \
-    "osl_" #name "_dfdvf",  "xXvf",             \
-    "osl_" #name "_dfvdf",  "xXvX",             \
-    "osl_" #name "_dfdvdf", "xXvX",             \
-    "osl_" #name "_dvdf",   "xvX",              \
-    "osl_" #name "_dvdff",  "xvXf",             \
-    "osl_" #name "_dvfdf",  "xvfX",             \
-    "osl_" #name "_dvdfdf", "xvXX",             \
-    "osl_" #name "_dvdv",   "xvv",              \
-    "osl_" #name "_dvdvf",  "xvvf",             \
-    "osl_" #name "_dvvdf",  "xvvX",             \
-    "osl_" #name "_dvdvdf", "xvvX"
-
-#define GENERIC_NOISE_DERIV_IMPL(name)          \
-    "osl_" #name "_dfdf",   "xsXXXX",           \
-    "osl_" #name "_dfdfdf", "xsXXXXX",          \
-    "osl_" #name "_dfdv",   "xsXXXX",           \
-    "osl_" #name "_dfdvdf", "xsXXXXX",          \
-    "osl_" #name "_dvdf",   "xsXXXX",           \
-    "osl_" #name "_dvdfdf", "xsXXXXX",          \
-    "osl_" #name "_dvdv",   "xsXXXX",           \
-    "osl_" #name "_dvdvdf", "xsXXXXX"
-
-#define PNOISE_IMPL(name)                       \
-    "osl_" #name "_fff",   "fff",               \
-    "osl_" #name "_fffff", "fffff",             \
-    "osl_" #name "_fvv",   "fvv",               \
-    "osl_" #name "_fvfvf", "fvfvf",             \
-    "osl_" #name "_vff",   "xvff",              \
-    "osl_" #name "_vffff", "xvffff",            \
-    "osl_" #name "_vvv",   "xvvv",              \
-    "osl_" #name "_vvfvf", "xvvfvf"
-
-#define PNOISE_DERIV_IMPL(name)                 \
-    "osl_" #name "_dfdff",    "xXXf",           \
-    "osl_" #name "_dfdffff",  "xXXfff",         \
-    "osl_" #name "_dffdfff",  "xXfXff",         \
-    "osl_" #name "_dfdfdfff", "xXXXff",         \
-    "osl_" #name "_dfdvv",    "xXXv",           \
-    "osl_" #name "_dfdvfvf",  "xXvfvf",         \
-    "osl_" #name "_dfvdfvf",  "xXvXvf",         \
-    "osl_" #name "_dfdvdfvf", "xXvXvf",         \
-    "osl_" #name "_dvdff",    "xvXf",           \
-    "osl_" #name "_dvdffff",  "xvXfff",         \
-    "osl_" #name "_dvfdfff",  "xvfXff",         \
-    "osl_" #name "_dvdfdfff", "xvXXff",         \
-    "osl_" #name "_dvdvv",    "xvvv",           \
-    "osl_" #name "_dvdvfvf",  "xvvfvf",         \
-    "osl_" #name "_dvvdfvf",  "xvvXvf",         \
-    "osl_" #name "_dvdvdfvf", "xvvXvf"
-
-#define GENERIC_PNOISE_DERIV_IMPL(name)         \
-    "osl_" #name "_dfdff",    "xsXXfXX",        \
-    "osl_" #name "_dfdfdfff", "xsXXXffXX",      \
-    "osl_" #name "_dfdvv",    "xsXXvXX",        \
-    "osl_" #name "_dfdvdfvf", "xsXvXvfXX",      \
-    "osl_" #name "_dvdff",    "xsvXfXX",        \
-    "osl_" #name "_dvdfdfff", "xsvXXffXX",      \
-    "osl_" #name "_dvdvv",    "xsvvvXX",        \
-    "osl_" #name "_dvdvdfvf", "xsvvXvfXX"
-
-#define UNARY_OP_IMPL(name)                     \
-    "osl_" #name "_ff",   "ff",                 \
-    "osl_" #name "_dfdf", "xXX",                \
-    "osl_" #name "_vv",   "xXX",                \
-    "osl_" #name "_dvdv", "xXX"
-
-#define BINARY_OP_IMPL(name)                    \
-    "osl_" #name "_fff",    "fff",              \
-    "osl_" #name "_dfdfdf", "xXXX",             \
-    "osl_" #name "_dffdf",  "xXfX",             \
-    "osl_" #name "_dfdff",  "xXXf",             \
-    "osl_" #name "_vvv",    "xXXX",             \
-    "osl_" #name "_dvdvdv", "xXXX",             \
-    "osl_" #name "_dvvdv",  "xXXX",             \
-    "osl_" #name "_dvdvv",  "xXXX"
-
-/// Table of all functions that we may call from the LLVM-compiled code.
-/// Alternating name and argument list, much like we use in oslc's type
-/// checking.  Note that nothing that's compiled into llvm_ops.cpp ought
-/// to need a declaration here.
-static const char *llvm_helper_function_table[] = {
-    // TODO: remove these
-    "osl_add_closure_closure", "CXCC",
-    "osl_mul_closure_float", "CXCf",
-    "osl_mul_closure_color", "CXCc",
-    "osl_allocate_closure_component", "CXiii",
-    "osl_allocate_weighted_closure_component", "CXiiiX",
-    "osl_closure_to_string", "sXC",
-    "osl_format", "ss*",
-    "osl_printf", "xXs*",
-    "osl_error", "xXs*",
-    "osl_warning", "xXs*",
-    "osl_incr_layers_executed", "xX",
-#if 1
-    NOISE_IMPL(cellnoise),
-    NOISE_DERIV_IMPL(cellnoise),
-    NOISE_IMPL(noise),
-    NOISE_DERIV_IMPL(noise),
-    NOISE_IMPL(snoise),
-    NOISE_DERIV_IMPL(snoise),
-    NOISE_IMPL(simplexnoise),
-    NOISE_DERIV_IMPL(simplexnoise),
-    NOISE_IMPL(usimplexnoise),
-    NOISE_DERIV_IMPL(usimplexnoise),
-    GENERIC_NOISE_DERIV_IMPL(gabornoise),
-    GENERIC_NOISE_DERIV_IMPL(genericnoise),
-    PNOISE_IMPL(pcellnoise),
-    PNOISE_DERIV_IMPL(pcellnoise),
-    PNOISE_IMPL(pnoise),
-    PNOISE_DERIV_IMPL(pnoise),
-    PNOISE_IMPL(psnoise),
-    PNOISE_DERIV_IMPL(psnoise),
-    GENERIC_PNOISE_DERIV_IMPL(gaborpnoise),
-    GENERIC_PNOISE_DERIV_IMPL(genericpnoise),
-    "osl_noiseparams_clear", "xX",
-    "osl_noiseparams_set_anisotropic", "xXi",
-    "osl_noiseparams_set_do_filter", "xXi",
-    "osl_noiseparams_set_direction", "xXv",
-    "osl_noiseparams_set_bandwidth", "xXf",
-    "osl_noiseparams_set_impulses", "xXf",
-#endif
-
-    "osl_spline_fff", "xXXXXi",
-    "osl_spline_dfdfdf", "xXXXXi",
-    "osl_spline_dfdff", "xXXXXi",
-    "osl_spline_dffdf", "xXXXXi",
-    "osl_spline_vfv", "xXXXXi",
-    "osl_spline_dvdfdv", "xXXXXi",
-    "osl_spline_dvdfv", "xXXXXi",
-    "osl_spline_dvfdv", "xXXXXi",
-    "osl_splineinverse_fff", "xXXXXi",
-    "osl_splineinverse_dfdfdf", "xXXXXi",
-    "osl_splineinverse_dfdff", "xXXXXi",
-    "osl_splineinverse_dffdf", "xXXXXi",
-    "osl_setmessage", "xXsLXisi",
-    "osl_getmessage", "iXssLXiisi",
-    "osl_pointcloud_search", "iXsXfiiXXii*",
-    "osl_pointcloud_get", "iXsXisLX",
-    "osl_pointcloud_write", "iXsXiXXX",
-    "osl_pointcloud_write_helper", "xXXXisLX",
-    "osl_blackbody_vf", "xXXf",
-    "osl_wavelength_color_vf", "xXXf",
-    "osl_luminance_fv", "xXXX",
-    "osl_luminance_dfdv", "xXXX",
-    "osl_split", "isXsii",
-
-#ifdef OSL_LLVM_NO_BITCODE
-    UNARY_OP_IMPL(sin),
-    UNARY_OP_IMPL(cos),
-    UNARY_OP_IMPL(tan),
-
-    UNARY_OP_IMPL(asin),
-    UNARY_OP_IMPL(acos),
-    UNARY_OP_IMPL(atan),
-    BINARY_OP_IMPL(atan2),
-    UNARY_OP_IMPL(sinh),
-    UNARY_OP_IMPL(cosh),
-    UNARY_OP_IMPL(tanh),
-
-    "osl_sincos_fff", "xfXX",
-    "osl_sincos_dfdff", "xXXX",
-    "osl_sincos_dffdf", "xXXX",
-    "osl_sincos_dfdfdf", "xXXX",
-    "osl_sincos_vvv", "xXXX",
-    "osl_sincos_dvdvv", "xXXX",
-    "osl_sincos_dvvdv", "xXXX",
-    "osl_sincos_dvdvdv", "xXXX",
-
-    UNARY_OP_IMPL(log),
-    UNARY_OP_IMPL(log2),
-    UNARY_OP_IMPL(log10),
-    UNARY_OP_IMPL(logb),
-    UNARY_OP_IMPL(exp),
-    UNARY_OP_IMPL(exp2),
-    UNARY_OP_IMPL(expm1),
-    BINARY_OP_IMPL(pow),
-    UNARY_OP_IMPL(erf),
-    UNARY_OP_IMPL(erfc),
-
-    "osl_pow_vvf", "xXXf",
-    "osl_pow_dvdvdf", "xXXX",
-    "osl_pow_dvvdf", "xXXX",
-    "osl_pow_dvdvf", "xXXX",
-
-    UNARY_OP_IMPL(sqrt),
-    UNARY_OP_IMPL(inversesqrt),
-
-    "osl_floor_ff", "ff",
-    "osl_floor_vv", "xXX",
-    "osl_ceil_ff", "ff",
-    "osl_ceil_vv", "xXX",
-    "osl_round_ff", "ff",
-    "osl_round_vv", "xXX",
-    "osl_trunc_ff", "ff",
-    "osl_trunc_vv", "xXX",
-    "osl_sign_ff", "ff",
-    "osl_sign_vv", "XX",
-    "osl_step_fff", "fff",
-    "osl_step_vvv", "xXXX",
-
-    "osl_isnan_if", "if",
-    "osl_isinf_if", "if",
-    "osl_isfinite_if", "if",
-    "osl_abs_ii", "ii",
-    "osl_fabs_ii", "ii",
-
-    UNARY_OP_IMPL(abs),
-    UNARY_OP_IMPL(fabs),
-
-    BINARY_OP_IMPL(fmod),
-
-    "osl_smoothstep_ffff", "ffff",
-    "osl_smoothstep_dfffdf", "xXffX",
-    "osl_smoothstep_dffdff", "xXfXf",
-    "osl_smoothstep_dffdfdf", "xXfXX",
-    "osl_smoothstep_dfdfff", "xXXff",
-    "osl_smoothstep_dfdffdf", "xXXfX",
-    "osl_smoothstep_dfdfdff", "xXXXf",
-    "osl_smoothstep_dfdfdfdf", "xXXXX",
-
-    "osl_transform_vmv", "xXXX",
-    "osl_transform_dvmdv", "xXXX",
-    "osl_transformv_vmv", "xXXX",
-    "osl_transformv_dvmdv", "xXXX",
-    "osl_transformn_vmv", "xXXX",
-    "osl_transformn_dvmdv", "xXXX",
-
-    "osl_transform_triple", "iXXiXiXXi",
-    "osl_transform_triple_nonlinear", "iXXiXiXXi",
-
-    "osl_mul_mm", "xXXX",
-    "osl_mul_mf", "xXXf",
-    "osl_mul_m_ff", "xXff",
-    "osl_div_mm", "xXXX",
-    "osl_div_mf", "xXXf",
-    "osl_div_fm", "xXfX",
-    "osl_div_m_ff", "xXff",
-    "osl_prepend_matrix_from", "iXXs",
-    "osl_get_from_to_matrix", "iXXss",
-    "osl_transpose_mm", "xXX",
-    "osl_determinant_fm", "fX",
-
-    "osl_dot_fvv", "fXX",
-    "osl_dot_dfdvdv", "xXXX",
-    "osl_dot_dfdvv", "xXXX",
-    "osl_dot_dfvdv", "xXXX",
-    "osl_cross_vvv", "xXXX",
-    "osl_cross_dvdvdv", "xXXX",
-    "osl_cross_dvdvv", "xXXX",
-    "osl_cross_dvvdv", "xXXX",
-    "osl_length_fv", "fX",
-    "osl_length_dfdv", "xXX",
-    "osl_distance_fvv", "fXX",
-    "osl_distance_dfdvdv", "xXXX",
-    "osl_distance_dfdvv", "xXXX",
-    "osl_distance_dfvdv", "xXXX",
-    "osl_normalize_vv", "xXX",
-    "osl_normalize_dvdv", "xXX",
-    "osl_prepend_color_from", "xXXs",
-
-    "osl_concat_sss", "sss",
-    "osl_strlen_is", "is",
-    "osl_startswith_iss", "iss",
-    "osl_endswith_iss", "iss",
-    "osl_substr_ssii", "ssii",
-    "osl_regex_impl", "iXsXisi",
-
-    "osl_texture_clear", "xX",
-    "osl_texture_set_firstchannel", "xXi",
-    "osl_texture_set_swrap", "xXs",
-    "osl_texture_set_twrap", "xXs",
-    "osl_texture_set_rwrap", "xXs",
-    "osl_texture_set_swrap_code", "xXi",
-    "osl_texture_set_twrap_code", "xXi",
-    "osl_texture_set_rwrap_code", "xXs",
-    "osl_texture_set_sblur", "xXf",
-    "osl_texture_set_tblur", "xXf",
-    "osl_texture_set_rblur", "xXf",
-    "osl_texture_set_swidth", "xXf",
-    "osl_texture_set_twidth", "xXf",
-    "osl_texture_set_rwidth", "xXf",
-    "osl_texture_set_fill", "xXf",
-    "osl_texture_set_time", "xXf",
-    "osl_texture_set_interp_name", "xXs",
-    "osl_texture_set_interp_code", "xXi",
-    "osl_texture_set_subimage", "xXi",
-    "osl_texture_set_subimagename", "xXs",
-    "osl_texture_set_missingcolor_arena", "xXX",
-    "osl_texture_set_missingcolor_alpha", "xXif",
-    "osl_texture", "iXsXffffffiXXX",
-    "osl_texture_alpha", "iXsXffffffiXXXXXX",
-    "osl_texture3d", "iXsXXXXXiXXXX",
-    "osl_texture3d_alpha", "iXsXXXXXiXXXXXXXX",
-    "osl_environment", "iXsXXXXiXXXXXX",
-    "osl_get_textureinfo", "iXXXiiiX",
-
-    "osl_trace_clear", "xX",
-    "osl_trace_set_mindist", "xXf",
-    "osl_trace_set_maxdist", "xXf",
-    "osl_trace_set_shade", "xXi",
-    "osl_trace_set_traceset", "xXs",
-    "osl_trace", "iXXXXXXXX",
-
-    "osl_get_attribute", "iXiXXiiXX",
-    "osl_calculatenormal", "xXXX",
-    "osl_area", "fX",
-    "osl_filterwidth_fdf", "fX",
-    "osl_filterwidth_vdv", "xXX",
-    "osl_dict_find_iis", "iXiX",
-    "osl_dict_find_iss", "iXXX",
-    "osl_dict_next", "iXi",
-    "osl_dict_value", "iXiXLX",
-    "osl_raytype_name", "iXX",
-    "osl_raytype_bit", "iXi",
-    "osl_bind_interpolated_param", "iXXLiX",
-    "osl_range_check", "iiiXXi",
-    "osl_naninf_check", "xiXiXXiXii",
-    "osl_uninit_check", "xLXXXiXii",
-#endif // OSL_LLVM_NO_BITCODE
-
-    NULL
-};
+typedef boost::unordered_map<std::string,HelperFuncRecord> HelperFuncMap;
+HelperFuncMap llvm_helper_function_map;
+atomic_int llvm_helper_function_map_initialized (0);
+spin_mutex llvm_helper_function_map_mutex;
 
 
 
-BackendLLVM::BackendLLVM (ShadingSystemImpl &shadingsys,
-                          ShaderGroup &group, ShadingContext *ctx)
-    : OSOProcessorBase (shadingsys, group, ctx),
-      m_stat_total_llvm_time(0), m_stat_llvm_setup_time(0),
-      m_stat_llvm_irgen_time(0), m_stat_llvm_opt_time(0),
-      m_stat_llvm_jit_time(0)
+static void
+initialize_llvm_helper_function_map ()
 {
-    // set_debug ();
-    // memset (&m_shaderglobals, 0, sizeof(ShaderGlobals));
-    // m_shaderglobals.context = m_context;
+    if (llvm_helper_function_map_initialized)
+        return;  // already done
+    spin_lock lock (llvm_helper_function_map_mutex);
+    if (llvm_helper_function_map_initialized())
+        return;
+#define DECL(name,signature) \
+    llvm_helper_function_map[#name] = HelperFuncRecord(signature,name);
+#include "builtindecl.h"
+#undef DECL
+
+    llvm_helper_function_map_initialized = 1;
 }
 
 
 
-BackendLLVM::~BackendLLVM ()
+void *
+helper_function_lookup (const std::string &name)
 {
-}
-
-
-
-int
-BackendLLVM::llvm_debug() const
-{
-    if (shadingsys().llvm_debug() == 0)
-        return 0;
-    if (shadingsys().debug_groupname() &&
-        shadingsys().debug_groupname() != group().name())
-        return 0;
-    if (inst() && shadingsys().debug_layername() &&
-        shadingsys().debug_layername() != inst()->layername())
-        return 0;
-    return shadingsys().llvm_debug();
+    HelperFuncMap::const_iterator i = llvm_helper_function_map.find (name);
+    if (i == llvm_helper_function_map.end())
+        return NULL;
+    return (void *) i->second.function;
 }
 
 
@@ -564,20 +233,57 @@ BackendLLVM::llvm_type_groupdata ()
         return m_llvm_type_groupdata;
 
     std::vector<llvm::Type*> fields;
+    int offset = 0;
+    int order = 0;
+
+    if (llvm_debug() >= 2)
+        std::cout << "Group param struct:\n";
 
     // First, add the array that tells if each layer has run.  But only make
     // slots for the layers that may be called/used.
+    if (llvm_debug() >= 2)
+        std::cout << "  layers run flags: " << m_num_used_layers
+                  << " at offset " << offset << "\n";
     int sz = (m_num_used_layers + 3) & (~3);  // Round up to 32 bit boundary
     fields.push_back (ll.type_array (ll.type_bool(), sz));
-    size_t offset = sz * sizeof(bool);
+    offset += sz * sizeof(bool);
+    ++order;
+
+    // Now add the array that tells which userdata have been initialized,
+    // and the space for the userdata values.
+    int nuserdata = (int) group().m_userdata_names.size();
+    if (nuserdata) {
+        if (llvm_debug() >= 2)
+            std::cout << "  userdata initialized flags: " << nuserdata
+                      << " at offset " << offset << ", field " << order << "\n";
+        ustring *names = & group().m_userdata_names[0];
+        TypeDesc *types = & group().m_userdata_types[0];
+        int *offsets = & group().m_userdata_offsets[0];
+        int sz = (nuserdata + 3) & (~3);
+        fields.push_back (ll.type_array (ll.type_bool(), sz));
+        offset += nuserdata * sizeof(bool);
+        ++order;
+        for (int i = 0; i < nuserdata; ++i) {
+            TypeDesc type = types[i];
+            int n = type.numelements() * 3;   // always make deriv room
+            type.arraylen = n;
+            fields.push_back (llvm_type (type));
+            // Alignment
+            int align = type.basesize();
+            offset = OIIO::round_to_multiple_of_pow2 (offset, align);
+            if (llvm_debug() >= 2)
+                std::cout << "  userdata " << names[i] << ' ' << type
+                          << ", field " << order << ", offset " << offset << "\n";
+            offsets[i] = offset;
+            offset += int(type.size());
+            ++order;
+        }
+    }
 
     // For each layer in the group, add entries for all params that are
     // connected or interpolated, and output params.  Also mark those
     // symbols with their offset within the group struct.
-    if (llvm_debug() >= 2)
-        std::cout << "Group param struct:\n";
     m_param_order_map.clear ();
-    int order = 1;
     for (int layer = 0;  layer < group().nlayers();  ++layer) {
         ShaderInstance *inst = group()[layer];
         if (inst->unused())
@@ -587,7 +293,8 @@ BackendLLVM::llvm_type_groupdata ()
             if (ts.is_structure())  // skip the struct symbol itself
                 continue;
             int arraylen = std::max (1, sym.typespec().arraylength());
-            int n = arraylen * (sym.has_derivs() ? 3 : 1);
+            int deriv_mult = sym.has_derivs() ? 3 : 1;
+            int n = arraylen * deriv_mult;
             ts.make_array (n);
             fields.push_back (llvm_type (ts));
 
@@ -602,13 +309,16 @@ BackendLLVM::llvm_type_groupdata ()
                           << " " << ts.c_str() << ", field " << order 
                           << ", offset " << offset << std::endl;
             sym.dataoffset ((int)offset);
-            offset += n * int(sym.size());
+            offset += int(sym.size()) * deriv_mult;
 
             m_param_order_map[&sym] = order;
             ++order;
         }
     }
     group().llvm_groupdata_size (offset);
+    if (llvm_debug() >= 2)
+        std::cout << " Group struct had " << order << " fields, total size "
+                  << offset << "\n\n";
 
     std::string groupdataname = Strutil::format("Groupdata_%llu",
                                                 (long long unsigned int)group().name().hash());
@@ -741,6 +451,48 @@ BackendLLVM::llvm_assign_initial_value (const Symbol& sym)
     ASSERT_MSG (sym.symtype() == SymTypeParam || sym.symtype() == SymTypeOutputParam,
                 "symtype was %d, data type was %s", (int)sym.symtype(), sym.typespec().c_str());
 
+    // Handle interpolated params by calling osl_bind_interpolated_param,
+    // which will check if userdata is already retrieved, if not it will
+    // call RendererServices::get_userdata to retrived it. In either case,
+    // it will return 1 if it put the userdata in the right spot (either
+    // retrieved de novo or copied from a previous retrieval), or 0 if no
+    // such userdata was available.
+    llvm::BasicBlock *after_userdata_block = NULL;
+    if (! sym.lockgeom() && ! sym.typespec().is_closure()) {
+        int userdata_index = -1;
+        ustring symname = sym.name();
+        TypeDesc type = sym.typespec().simpletype();
+        for (int i = 0, e = (int)group().m_userdata_names.size(); i < e; ++i) {
+            if (symname == group().m_userdata_names[i] &&
+                    equivalent (type, group().m_userdata_types[i])) {
+                userdata_index = i;
+                break;
+            }
+        }
+        ASSERT (userdata_index >= 0);
+        std::vector<llvm::Value*> args;
+        args.push_back (sg_void_ptr());
+        args.push_back (ll.constant (symname));
+        args.push_back (ll.constant (type));
+        args.push_back (ll.constant ((int) group().m_userdata_derivs[userdata_index]));
+        args.push_back (groupdata_field_ptr (2 + userdata_index)); // userdata data ptr
+        args.push_back (ll.constant ((int) sym.has_derivs()));
+        args.push_back (llvm_void_ptr (sym));
+        args.push_back (ll.constant (sym.derivsize()));
+        args.push_back (ll.void_ptr (userdata_initialized_ref(userdata_index)));
+        args.push_back (ll.constant (userdata_index));
+        llvm::Value *got_userdata =
+            ll.call_function ("osl_bind_interpolated_param",
+                              &args[0], args.size());
+        // We will enclose the subsequent initialization of default values
+        // or init ops in an "if" so that the extra copies or code don't
+        // happen if the userdata was retrieved.
+        llvm::BasicBlock *no_userdata_block = ll.new_basic_block ("no_userdata");
+        after_userdata_block = ll.new_basic_block ();
+        llvm::Value *cond_val = ll.op_eq (got_userdata, ll.constant(0));
+        ll.op_branch (cond_val, no_userdata_block, after_userdata_block);
+    }
+
     if (sym.has_init_ops() && sym.valuesource() == Symbol::DefaultVal) {
         // Handle init ops.
         build_llvm_code (sym.initbegin(), sym.initend());
@@ -776,21 +528,10 @@ BackendLLVM::llvm_assign_initial_value (const Symbol& sym)
             llvm_zero_derivs (sym);
     }
 
-    // Handle interpolated params.
-    // FIXME -- really, we shouldn't assign defaults or run init ops if
-    // the values are interpolated.  The perf hit is probably small, since
-    // there are so few interpolated params, but we should come back and
-    // fix this later.
-    if ((sym.symtype() == SymTypeParam || sym.symtype() == SymTypeOutputParam)
-        && ! sym.lockgeom()) {
-        std::vector<llvm::Value*> args;
-        args.push_back (sg_void_ptr());
-        args.push_back (ll.constant (sym.name()));
-        args.push_back (ll.constant (sym.typespec().simpletype()));
-        args.push_back (ll.constant ((int) sym.has_derivs()));
-        args.push_back (llvm_void_ptr (sym));
-        ll.call_function ("osl_bind_interpolated_param",
-                          &args[0], args.size());                            
+    if (after_userdata_block) {
+        // If we enclosed the default initialization in an "if", jump to the
+        // next basic block now.
+        ll.op_branch (after_userdata_block);
     }
 }
 
@@ -832,9 +573,10 @@ BackendLLVM::llvm_generate_debugnan (const Opcode &op)
                                 ll.constant(op.sourceline()),
                                 ll.constant(sym.name()),
                                 offset,
-                                ncheck
+                                ncheck,
+                                ll.constant(op.opname())
                               };
-        ll.call_function ("osl_naninf_check", args, 9);
+        ll.call_function ("osl_naninf_check", args, 10);
     }
 }
 
@@ -913,7 +655,8 @@ BackendLLVM::build_llvm_code (int beginop, int endop, llvm::BasicBlock *bb)
                    op.opname() == op_end) {
             // Skip this op, it does nothing...
         } else {
-            shadingsys().error ("LLVMOSL: Unsupported op %s in layer %s\n", op.opname().c_str(), inst()->layername().c_str());
+            shadingcontext()->error ("LLVMOSL: Unsupported op %s in layer %s\n",
+                                     op.opname(), inst()->layername());
             return false;
         }
 
@@ -950,7 +693,7 @@ BackendLLVM::build_llvm_instance (bool groupentry)
 
     // Set up a new IR builder
     ll.new_builder (entry_bb);
-#if 0 /* helpful for debuggin */
+#if 0 /* helpful for debugging */
     if (llvm_debug() && groupentry)
         llvm_gen_debug_printf (Strutil::format("\n\n\n\nGROUP! %s",group().name()));
     if (llvm_debug())
@@ -961,18 +704,23 @@ BackendLLVM::build_llvm_instance (bool groupentry)
         ll.call_function ("osl_incr_layers_executed", sg_void_ptr());
 
     if (groupentry) {
+        // If this is the group entry point, clear all the "layer_run" and
+        // "userdata_initialized" flags.
         if (m_num_used_layers > 1) {
-            // If this is the group entry point, clear all the "layer
-            // executed" bits.  If it's not the group entry (but rather is
-            // an upstream node), then set its bit!
             int sz = (m_num_used_layers + 3) & (~3);  // round up to 32 bits
-            ll.op_memset (ll.void_ptr(layer_run_ptr(0)), 0, sz, 4 /*align*/);
+            ll.op_memset (ll.void_ptr(layer_run_ref(0)), 0, sz, 4 /*align*/);
         }
+        int num_userdata = (int) group().m_userdata_names.size();
+        if (num_userdata) {
+            int sz = (num_userdata + 3) & (~3);  // round up to 32 bits
+            ll.op_memset (ll.void_ptr(userdata_initialized_ref(0)), 0, sz, 4 /*align*/);
+        }
+
         // Group entries also need to allot space for ALL layers' params
         // that are closures (to avoid weird order of layer eval problems).
         for (int i = 0;  i < group().nlayers();  ++i) {
             ShaderInstance *gi = group()[i];
-            if (gi->unused())
+            if (gi->unused() || gi->empty_instance())
                 continue;
             FOREACH_PARAM (Symbol &sym, gi) {
                if (sym.typespec().is_closure_based()) {
@@ -1023,9 +771,10 @@ BackendLLVM::build_llvm_instance (bool groupentry)
                      ll.constant((int)s.has_derivs()), sg_void_ptr(), 
                      ll.constant(ustring(inst()->shadername())),
                      ll.constant(0), ll.constant(s.name()),
-                     ll.constant(0), ll.constant(ncomps)
+                     ll.constant(0), ll.constant(ncomps),
+                     ll.constant("<none>")
                 };
-                ll.call_function ("osl_naninf_check", args, 9);
+                ll.call_function ("osl_naninf_check", args, 10);
             }
         }
     }
@@ -1037,7 +786,7 @@ BackendLLVM::build_llvm_instance (bool groupentry)
             continue;
         // Skip if it's never read and isn't connected
         if (! s.everread() && ! s.connected_down() && ! s.connected()
-              && ! shadingsys().is_renderer_output(s.name()))
+              && ! s.renderer_output())
             continue;
         // Set initial value for params (may contain init ops)
         llvm_assign_initial_value (s);
@@ -1109,10 +858,14 @@ BackendLLVM::initialize_llvm_group ()
     m_llvm_type_closure_component = NULL;
     m_llvm_type_closure_component_attr = NULL;
 
-    for (int i = 0;  llvm_helper_function_table[i];  i += 2) {
-        const char *funcname = llvm_helper_function_table[i];
+    initialize_llvm_helper_function_map();
+    ll.InstallLazyFunctionCreator (helper_function_lookup);
+
+    for (HelperFuncMap::iterator i = llvm_helper_function_map.begin(),
+         e = llvm_helper_function_map.end(); i != e; ++i) {
+        const char *funcname = i->first.c_str();
         bool varargs = false;
-        const char *types = llvm_helper_function_table[i+1];
+        const char *types = i->second.argtypes;
         int advance;
         TypeSpec rettype = OSLCompilerImpl::type_from_code (types, &advance);
         types += advance;
@@ -1165,15 +918,16 @@ BackendLLVM::run ()
     ll.module (ll.new_module ("llvm_ops"));
 #else
     ll.module (ll.module_from_bitcode (osl_llvm_compiled_ops_block,
-                                       osl_llvm_compiled_ops_size, &err));
+                                       osl_llvm_compiled_ops_size,
+                                       "llvm_ops", &err));
     if (err.length())
-        shadingsys().error ("ParseBitcodeFile returned '%s'\n", err.c_str());
+        shadingcontext()->error ("ParseBitcodeFile returned '%s'\n", err.c_str());
     ASSERT (ll.module());
 #endif
 
     // Create the ExecutionEngine
     if (! ll.make_jit_execengine (&err)) {
-        shadingsys().error ("Failed to create engine: %s\n", err.c_str());
+        shadingcontext()->error ("Failed to create engine: %s\n", err.c_str());
         ASSERT (0);
         return;
     }
@@ -1189,14 +943,15 @@ BackendLLVM::run ()
     int nlayers = group().nlayers();
     m_layer_remap.resize (nlayers);
     m_num_used_layers = 0;
-    for (int layer = 0;  layer < group().nlayers();  ++layer) {
+    for (int layer = 0;  layer < nlayers;  ++layer) {
         bool lastlayer = (layer == (nlayers-1));
-        if (! group()[layer]->unused() || lastlayer)
+        if (lastlayer ||
+            (! group()[layer]->unused() && !group()[layer]->empty_instance()))
             m_layer_remap[layer] = m_num_used_layers++;
         else
             m_layer_remap[layer] = -1;
     }
-    shadingsys().m_stat_empty_instances += group().nlayers()-m_num_used_layers;
+    shadingsys().m_stat_empty_instances += nlayers - m_num_used_layers;
 
     initialize_llvm_group ();
 
@@ -1215,8 +970,8 @@ BackendLLVM::run ()
 
     if (shadingsys().m_max_local_mem_KB &&
         m_llvm_local_mem/1024 > shadingsys().m_max_local_mem_KB) {
-        shadingsys().error ("Shader group \"%s\" needs too much local storage: %d KB",
-                            group().name().c_str(), m_llvm_local_mem/1024);
+        shadingcontext()->error ("Shader group \"%s\" needs too much local storage: %d KB",
+                                 group().name(), m_llvm_local_mem/1024);
     }
 
     // Optimize the LLVM IR unless it's just a ret void group (1 layer,
@@ -1268,9 +1023,8 @@ BackendLLVM::run ()
     m_stat_total_llvm_time = timer();
 
     if (shadingsys().m_compile_report) {
-        shadingsys().info ("JITed shader group %s:",
-                           group().name() ? group().name().c_str() : "");
-        shadingsys().info ("    (%1.2fs = %1.2f setup, %1.2f ir, %1.2f opt, %1.2f jit; local mem %dKB)",
+        shadingcontext()->info ("JITed shader group %s:", group().name());
+        shadingcontext()->info ("    (%1.2fs = %1.2f setup, %1.2f ir, %1.2f opt, %1.2f jit; local mem %dKB)",
                            m_stat_total_llvm_time, 
                            m_stat_llvm_setup_time,
                            m_stat_llvm_irgen_time, m_stat_llvm_opt_time,

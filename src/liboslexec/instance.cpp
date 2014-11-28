@@ -33,8 +33,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <boost/foreach.hpp>
 
-#include "OpenImageIO/dassert.h"
-#include "OpenImageIO/strutil.h"
+#include <OpenImageIO/dassert.h>
+#include <OpenImageIO/strutil.h>
 
 #include "oslexec_pvt.h"
 
@@ -51,7 +51,7 @@ using OIIO::ParamValueList;
 
 
 ShaderInstance::ShaderInstance (ShaderMaster::ref master,
-                                const char *layername) 
+                                string_view layername)
     : m_master(master),
       //DON'T COPY  m_instsymbols(m_master->m_symbols),
       //DON'T COPY  m_instops(m_master->m_ops), m_instargs(m_master->m_args),
@@ -206,11 +206,12 @@ ShaderInstance::parameters (const ParamValueList &params)
     }
 
     BOOST_FOREACH (const ParamValue &p, params) {
-        if (shadingsys().debug())
-            shadingsys().info (" PARAMETER %s %s",
-                               p.name().c_str(), p.type().c_str());
+        if (p.name().size() == 0)
+            continue;   // skip empty names
         int i = findparam (p.name());
         if (i >= 0) {
+            if (shadingsys().debug())
+                shadingsys().info (" PARAMETER %s %s", p.name(), p.type());
             const Symbol *sm = master()->symbol(i);
             SymOverrideInfo *so = &m_instoverrides[i];
             TypeSpec t = sm->typespec();
@@ -239,8 +240,14 @@ ShaderInstance::parameters (const ParamValueList &params)
             // just skip the parameter, let it "keep" the default.
             void *defaultdata = m_master->param_default_storage(i);
             if (lockgeom && 
-                  memcmp (defaultdata, p.data(), t.simpletype().size()) == 0)
+                  memcmp (defaultdata, p.data(), t.simpletype().size()) == 0) {
+                // Must reset valuesource to default, in case the parameter
+                // was set already, and now is being changed back to default.
+                so->valuesource (Symbol::DefaultVal);
+                void *data = param_storage(i);
+                memcpy (data, p.data(), t.simpletype().size()); // clobber old value
                 continue;
+            }
 
             so->valuesource (Symbol::InstanceVal);
             void *data = param_storage(i);
@@ -301,7 +308,7 @@ ShaderInstance::add_connection (int srclayer, const ConnectedParam &srccon,
 
 
 void
-ShaderInstance::copy_code_from_master ()
+ShaderInstance::copy_code_from_master (ShaderGroup &group)
 {
     ASSERT (m_instops.empty() && m_instargs.empty());
     // reserve with enough room for a few insertions
@@ -316,17 +323,20 @@ ShaderInstance::copy_code_from_master ()
     m_instsymbols = m_master->m_symbols;
 
     // Copy the instance override data
+    // Also set the renderer_output flags where needed.
     ASSERT (m_instoverrides.size() == (size_t)std::max(0,lastparam()));
     ASSERT (m_instsymbols.size() >= (size_t)std::max(0,lastparam()));
     if (m_instoverrides.size()) {
         for (size_t i = 0, e = lastparam();  i < e;  ++i) {
+            Symbol *si = &m_instsymbols[i];
             if (m_instoverrides[i].valuesource() != Symbol::DefaultVal) {
-                Symbol *si = &m_instsymbols[i];
                 si->data (param_storage(i));
                 si->valuesource (m_instoverrides[i].valuesource());
                 si->connected_down (m_instoverrides[i].connected_down());
                 si->lockgeom (m_instoverrides[i].lockgeom());
             }
+            if (shadingsys().is_renderer_output (layername(), si->name(), &group))
+                si->renderer_output (true);
         }
     }
     off_t symmem = vectorbytes(m_instsymbols) - vectorbytes(m_instoverrides);
@@ -403,6 +413,34 @@ ShaderInstance::print ()
         out << "\n";
     }
     return out.str ();
+}
+
+
+
+void
+ShaderInstance::compute_run_lazily ()
+{
+    if (shadingsys().m_lazylayers) {
+        // lazylayers option turned on: unconditionally run shaders with no
+        // outgoing connections ("root" nodes, including the last in the
+        // group) or shaders that alter global variables (unless
+        // 'lazyglobals' is turned on).
+        if (shadingsys().m_lazyglobals)
+            run_lazily (outgoing_connections());
+        else
+            run_lazily (outgoing_connections() && ! writes_globals());
+#if 0
+        // Suggested warning below... but are there use cases where people
+        // want these to run (because they will extract the results they
+        // want from output params)?
+        if (! outgoing_connections() && ! writes_globals())
+            shadingsys().warning ("Layer \"%s\" (shader %s) will run even though it appears to have no used results",
+                     layername(), shadername());
+#endif
+    } else {
+        // lazylayers option turned off: never run lazily
+        run_lazily (false);
+    }
 }
 
 
@@ -496,6 +534,11 @@ ShaderInstance::mergeable (const ShaderInstance &b, const ShaderGroup &g) const
                     continue;
                 return false;
             }
+            // But still, if they differ in their lockgeom'edness, we can't
+            // merge the instances.
+            if (m_instoverrides[i].lockgeom() != b.m_instoverrides[i].lockgeom()) {
+                return false;
+            }
         }
     }
 
@@ -570,22 +613,27 @@ ShaderInstance::mergeable (const ShaderInstance &b, const ShaderGroup &g) const
 
 
 
-ShaderGroup::ShaderGroup (const char *name)
-  : m_name(name),
-    m_llvm_compiled_version(NULL), m_llvm_groupdata_size(0),
-    m_optimized(0), m_does_nothing(false)
+ShaderGroup::ShaderGroup (string_view name)
+  : m_optimized(0), m_does_nothing(false),
+    m_llvm_groupdata_size(0),
+    m_llvm_compiled_version(NULL),
+    m_name(name)
 {
     m_executions = 0;
+    m_stat_total_shading_time_ticks = 0;
 }
 
 
 
-ShaderGroup::ShaderGroup (const ShaderGroup &g, const char *name)
-  : m_name(name), m_layers(g.m_layers),
-    m_llvm_compiled_version(NULL), m_llvm_groupdata_size(0),
-    m_optimized(0), m_does_nothing(false)
+ShaderGroup::ShaderGroup (const ShaderGroup &g, string_view name)
+  : m_optimized(0), m_does_nothing(false),
+    m_llvm_groupdata_size(0),
+    m_llvm_compiled_version(NULL),
+    m_layers(g.m_layers),
+    m_name(name)
 {
     m_executions = 0;
+    m_stat_total_shading_time_ticks = 0;
 }
 
 
@@ -604,6 +652,77 @@ ShaderGroup::~ShaderGroup ()
                   << "executed on " << executions() << " points\n";
     }
 #endif
+}
+
+
+
+std::string
+ShaderGroup::serialize () const
+{
+    std::ostringstream out;
+    out.precision (9);
+    lock_guard lock (m_mutex);
+    for (int i = 0, nl = nlayers(); i < nl; ++i) {
+        const ShaderInstance *inst = m_layers[i].get();
+
+        bool dstsyms_exist = inst->symbols().size();
+        for (int p = 0;  p < inst->lastparam(); ++p) {
+            const Symbol *s = dstsyms_exist ? inst->symbol(p) : inst->mastersymbol(p);
+            ASSERT (s);
+            if (s->symtype() != SymTypeParam && s->symtype() != SymTypeOutputParam)
+                continue;
+            Symbol::ValueSource vs = dstsyms_exist ? s->valuesource()
+                                                   : inst->instoverride(p)->valuesource();
+            if (vs == Symbol::InstanceVal) {
+                TypeDesc type = s->typespec().simpletype();
+                out << "param " << type << ' ' << s->name();
+                int offset = s->dataoffset();
+                int nvals = type.numelements() * type.aggregate;
+                if (type.basetype == TypeDesc::INT) {
+                    const int *vals = &inst->m_iparams[offset];
+                    for (int i = 0; i < nvals; ++i)
+                        out << ' ' << vals[i];
+                } else if (type.basetype == TypeDesc::FLOAT) {
+                    const float *vals = &inst->m_fparams[offset];
+                    for (int i = 0; i < nvals; ++i)
+                        out << ' ' << vals[i];
+                } else if (type.basetype == TypeDesc::STRING) {
+                    const ustring *vals = &inst->m_sparams[offset];
+                    for (int i = 0; i < nvals; ++i)
+                        out << ' ' << '\"' << Strutil::escape_chars(vals[i]) << '\"';
+                } else {
+                    ASSERT_MSG (0, "unknown type for serialization: %s (%s)",
+                                   type.c_str(), s->typespec().c_str());
+                }
+                bool lockgeom = dstsyms_exist ? s->lockgeom()
+                                              : inst->instoverride(p)->lockgeom();
+                if (! lockgeom)
+                    out << Strutil::format (" [[int lockgeom=%d]]", lockgeom);
+                out << " ;\n";
+            }
+        }
+        out << "shader " << inst->shadername() << ' ' << inst->layername() << " ;\n";
+        for (int c = 0, nc = inst->nconnections(); c < nc; ++c) {
+            const Connection &con (inst->connection(c));
+            ASSERT (con.srclayer >= 0);
+            const ShaderInstance *srclayer = m_layers[con.srclayer].get();
+            ASSERT (srclayer);
+            ustring srclayername = srclayer->layername();
+            ASSERT (con.src.param >= 0 && con.dst.param >= 0);
+            bool srcsyms_exist = srclayer->symbols().size();
+            ustring srcparam = srcsyms_exist ? srclayer->symbol(con.src.param)->name()
+                                             : srclayer->mastersymbol(con.src.param)->name();
+            ustring dstparam = dstsyms_exist ? inst->symbol(con.dst.param)->name()
+                                             : inst->mastersymbol(con.dst.param)->name();
+            // FIXME: Assertions to be sure we don't yet support individual
+            // channel or array element connections. Fix eventually.
+            ASSERT (con.src.arrayindex == -1 && con.src.channel == -1);
+            ASSERT (con.dst.arrayindex == -1 && con.dst.channel == -1);
+            out << "connect " <<  srclayername << '.' << srcparam << ' '
+                << inst->layername() << '.' << dstparam << " ;\n";
+        }
+    }
+    return out.str();
 }
 
 

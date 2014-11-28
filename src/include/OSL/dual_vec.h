@@ -189,7 +189,7 @@ robust_multVecMatrix (const Matrix44 &M, const Dual2<Vec3> &in, Dual2<Vec3> &out
 /// Multiply a matrix times a direction with derivatives to obtain
 /// a transformed direction with derivatives.
 inline void
-multDirMatrix (const Matrix44 &M, Dual2<Vec3> &in, Dual2<Vec3> &out)
+multDirMatrix (const Matrix44 &M, const Dual2<Vec3> &in, Dual2<Vec3> &out)
 {
     M.multDirMatrix (in.val(), out.val());
     M.multDirMatrix (in.dx(), out.dx());
@@ -245,8 +245,22 @@ operator* (const Vec3 &a, const Dual2<float> &b)
     return Dual2<Vec3>(a*b.val(), a*b.dx(), a*b.dy());
 }
 
-inline Dual2<Vec3> 
+inline Dual2<Vec3>
+operator* (const Dual2<float> &b, const Vec3 &a)
+{
+    return Dual2<Vec3>(a*b.val(), a*b.dx(), a*b.dy());
+}
+
+inline Dual2<Vec3>
 operator* (const Dual2<Vec3> &a, const Dual2<float> &b)
+{
+    return Dual2<Vec3>(a.val()*b.val(), 
+                       a.val()*b.dx() + a.dx()*b.val(),
+                       a.val()*b.dy() + a.dy()*b.val());
+}
+
+inline Dual2<Vec3> 
+operator* (const Dual2<float> &b, const Dual2<Vec3> &a)
 {
     return Dual2<Vec3>(a.val()*b.val(), 
                        a.val()*b.dx() + a.dx()*b.val(),

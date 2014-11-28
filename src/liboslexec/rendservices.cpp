@@ -34,9 +34,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using namespace OSL;
 using namespace OSL::pvt;
 
-#include "OpenImageIO/strutil.h"
-#include "OpenImageIO/dassert.h"
-#include "OpenImageIO/filesystem.h"
+#include <OpenImageIO/strutil.h>
+#include <OpenImageIO/dassert.h>
+#include <OpenImageIO/filesystem.h>
 
 #include <boost/algorithm/string.hpp>
 
@@ -44,12 +44,45 @@ using namespace OSL::pvt;
 OSL_NAMESPACE_ENTER
 
 
+namespace {
+static TextureSystem *texturesys_ = NULL;
+static spin_mutex texturesys_mutex;
+}
+
+
+
+RendererServices::RendererServices (TextureSystem *texsys)
+{
+    // Ensure thread safety while checking if we already have a
+    // TextureSystem.
+    OIIO::spin_lock lock (texturesys_mutex);
+    if (! texturesys_) {
+        if (texsys) {// caller provided a texture system
+            texturesys_ = texsys;
+        } else { // Need to create a new texture system
+            texturesys_ = TextureSystem::create (true /* shared */);
+            // Make some good guesses about default options
+            texturesys_->attribute ("automip",  1);
+            texturesys_->attribute ("autotile", 64);
+        }
+    }
+}
+
+
+
+TextureSystem *
+RendererServices::texturesys () const
+{
+    return texturesys_;
+}
+
+
 
 bool
-RendererServices::get_inverse_matrix (Matrix44 &result,
+RendererServices::get_inverse_matrix (ShaderGlobals *sg, Matrix44 &result,
                                       TransformationPtr xform, float time)
 {
-    bool ok = get_matrix (result, xform, time);
+    bool ok = get_matrix (sg, result, xform, time);
     if (ok)
         result.invert ();
     return ok;
@@ -58,9 +91,10 @@ RendererServices::get_inverse_matrix (Matrix44 &result,
 
 
 bool
-RendererServices::get_inverse_matrix (Matrix44 &result, TransformationPtr xform)
+RendererServices::get_inverse_matrix (ShaderGlobals *sg, Matrix44 &result,
+                                      TransformationPtr xform)
 {
-    bool ok = get_matrix (result, xform);
+    bool ok = get_matrix (sg, result, xform);
     if (ok)
         result.invert ();
     return ok;
@@ -69,9 +103,10 @@ RendererServices::get_inverse_matrix (Matrix44 &result, TransformationPtr xform)
 
 
 bool
-RendererServices::get_inverse_matrix (Matrix44 &result, ustring to, float time)
+RendererServices::get_inverse_matrix (ShaderGlobals *sg, Matrix44 &result,
+                                      ustring to, float time)
 {
-    bool ok = get_matrix (result, to, time);
+    bool ok = get_matrix (sg, result, to, time);
     if (ok)
         result.invert ();
     return ok;
@@ -80,31 +115,15 @@ RendererServices::get_inverse_matrix (Matrix44 &result, ustring to, float time)
 
 
 bool
-RendererServices::get_inverse_matrix (Matrix44 &result, ustring to)
+RendererServices::get_inverse_matrix (ShaderGlobals *sg, Matrix44 &result,
+                                      ustring to)
 {
-    bool ok = get_matrix (result, to);
+    bool ok = get_matrix (sg, result, to);
     if (ok)
         result.invert ();
     return ok;
 }
 
-
-
-// Just ask for the global shared TextureSystem.
-static TextureSystem *
-texturesys ()
-{
-    static TextureSystem *ts = NULL;
-    static spin_mutex mutex;
-    OIIO::spin_lock lock (mutex);
-    if (! ts) {
-        ts = TextureSystem::create (true /* shared */);
-        // Make some good guesses about default options
-        ts->attribute ("automip",  1);
-        ts->attribute ("autotile", 64);
-    }
-    return ts;
-}
 
 
 
@@ -112,17 +131,16 @@ bool
 RendererServices::texture (ustring filename, TextureOpt &options,
                            ShaderGlobals *sg,
                            float s, float t, float dsdx, float dtdx,
-                           float dsdy, float dtdy, float *result)
+                           float dsdy, float dtdy, int nchannels,
+                           float *result, float *dresultds, float *dresultdt)
 {
-    bool status =  texturesys()->texture (filename, options, s, t,
-                                          dsdx, dtdx, dsdy, dtdy, result);
-    if (!status)
-    {
+    bool status = texturesys()->texture (filename, options, s, t,
+                                         dsdx, dtdx, dsdy, dtdy,
+                                         nchannels, result, dresultds, dresultdt);
+    if (!status) {
         std::string err = texturesys()->geterror();
         if (err.size()) {
-            std::cerr << "[RendererServices::texture] " << err.c_str();
-            if (err[err.size()-1] != '\n')
-                std::cerr << "\n";
+            sg->context->error ("[RendererServices::texture] %s", err);
         }
     }
     return status;
@@ -134,17 +152,16 @@ bool
 RendererServices::texture3d (ustring filename, TextureOpt &options,
                              ShaderGlobals *sg, const Vec3 &P,
                              const Vec3 &dPdx, const Vec3 &dPdy,
-                             const Vec3 &dPdz, float *result)
+                             const Vec3 &dPdz, int nchannels, float *result,
+                             float *dresultds, float *dresultdt, float *dresultdr)
 {
     bool status = texturesys()->texture3d (filename, options, P, dPdx, dPdy, dPdz,
-                                            result);
-    if (!status)
-    {
+                                           nchannels, result,
+                                           dresultds, dresultdt, dresultdr);
+    if (!status) {
         std::string err = texturesys()->geterror();
         if (err.size()) {
-            std::cerr << "[RendererServices::texture3d] " << err.c_str();
-            if (err[err.size()-1] != '\n')
-                std::cerr << "\n";
+            sg->context->error ("[RendererServices::texture3d] %s", err);
         }
     }
     return status;
@@ -155,15 +172,16 @@ RendererServices::texture3d (ustring filename, TextureOpt &options,
 bool
 RendererServices::environment (ustring filename, TextureOpt &options,
                                ShaderGlobals *sg, const Vec3 &R,
-                               const Vec3 &dRdx, const Vec3 &dRdy, float *result)
+                               const Vec3 &dRdx, const Vec3 &dRdy,
+                               int nchannels, float *result,
+                               float *dresultds, float *dresultdt)
 {
-    bool status = texturesys()->environment (filename, options, R, dRdx, dRdy, result);
+    bool status = texturesys()->environment (filename, options, R, dRdx, dRdy,
+                                             nchannels, result, dresultds, dresultdt);
     if (!status) {
         std::string err = texturesys()->geterror();
         if (err.size()) {
-            std::cerr << "[RendererServices::environment] " << err.c_str();
-            if (err[err.size()-1] != '\n')
-                std::cerr << "\n";
+            sg->context->error ("[RendererServices::environment] %s", err);
         }
     }
     return status;
@@ -172,7 +190,8 @@ RendererServices::environment (ustring filename, TextureOpt &options,
 
     
 bool
-RendererServices::get_texture_info (ustring filename, int subimage,
+RendererServices::get_texture_info (ShaderGlobals *sg,
+                                    ustring filename, int subimage,
                                     ustring dataname,
                                     TypeDesc datatype, void *data)
 {
@@ -181,9 +200,7 @@ RendererServices::get_texture_info (ustring filename, int subimage,
     if (!status) {
         std::string err = texturesys()->geterror();
         if (err.size()) {
-            std::cerr << "[RendererServices::get_texture_info] " << err.c_str();
-            if (err[err.size()-1] != '\n')
-                std::cerr << "\n";
+            sg->context->error ("[RendererServices::get_texture_info] %s", err);
         }
     }
     return status;

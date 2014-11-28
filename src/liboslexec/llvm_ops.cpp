@@ -91,38 +91,28 @@ examples), as you are just coding in C++, but there are some rules:
 */
 
 
-#include <string>
-#include <cstdio>
+#include <iostream>
 
-#include "oslconfig.h"
-#include "oslexec_pvt.h"
-#include "dual.h"
+#include "OSL/oslconfig.h"
+#include "OSL/rendererservices.h"
+#include "OSL/shaderglobals.h"
+#include "OSL/dual.h"
+#include "OSL/dual_vec.h"
 using namespace OSL;
-using namespace OSL::pvt;
 
-#include <dual.h>
-#include <dual_vec.h>
 #include <OpenEXR/ImathFun.h>
 #include <OpenImageIO/fmath.h>
-
-using OIIO::safe_asinf;
-using OIIO::safe_acosf;
-using OIIO::isinf;
-
-#ifdef _WIN32
-using OIIO::roundf;
-using OIIO::truncf;
-using OIIO::expm1f;
-using OIIO::erff;
-using OIIO::erfcf;
-using OIIO::log2f;
-using OIIO::logbf;
-using OIIO::exp2f;
+#if OIIO_VERSION >= 10505
+#  include <OpenImageIO/simd.h>
 #endif
 
-#ifndef _MSC_VER
-using OIIO::isnan;
-using OIIO::isfinite;
+#if defined(_MSC_VER) && _MSC_VER < 1700
+using OIIO::isinf;
+#endif
+
+#if defined(_MSC_VER) && _MSC_VER < 1800
+using OIIO::roundf;
+using OIIO::truncf;
 #endif
 
 #if defined(__FreeBSD__)
@@ -132,6 +122,12 @@ using OIIO::isfinite;
 using OIIO::log2f;
 #endif
 #endif
+
+
+#ifdef OSL_COMPILING_TO_BITCODE
+void * __dso_handle = 0; // necessary to avoid linkage issues in bitcode
+#endif
+
 
 // Handy re-casting macros
 #define USTR(cstr) (*((ustring *)&cstr))
@@ -144,14 +140,53 @@ using OIIO::log2f;
 #define TYPEDESC(x) (*(TypeDesc *)&x)
 
 
-OSL_SHADEOP void
-osl_assert_nonnull (void *x, const char *msg)
+#ifndef OSL_SHADEOP
+#define OSL_SHADEOP extern "C" OSL_LLVM_EXPORT
+#endif
+
+
+OSL_NAMESPACE_ENTER
+
+
+inline int
+tex_interp_to_code (ustring modename)
 {
-    if (!x && msg)
-        printf ("found null %s\n", msg);
-    ASSERT (x && "should be non-null");
+    static ustring u_linear ("linear");
+    static ustring u_smartcubic ("smartcubic");
+    static ustring u_cubic ("cubic");
+    static ustring u_closest ("closest");
+
+    int mode = -1;
+    if (modename == u_smartcubic)
+        mode = TextureOpt::InterpSmartBicubic;
+    else if (modename == u_linear)
+        mode = TextureOpt::InterpBilinear;
+    else if (modename == u_cubic)
+        mode = TextureOpt::InterpBicubic;
+    else if (modename == u_closest)
+        mode = TextureOpt::InterpClosest;
+    return mode;
 }
 
+
+
+// Layout of structure we use to pass noise parameters
+struct NoiseParams {
+    int anisotropic;
+    int do_filter;
+    Vec3 direction;
+    float bandwidth;
+    float impulses;
+
+    NoiseParams ()
+        : anisotropic(0), do_filter(true), direction(1.0f,0.0f,0.0f),
+          bandwidth(1.0f), impulses(16.0f)
+    {
+    }
+};
+
+
+OSL_NAMESPACE_EXIT
 
 
 #define MAKE_UNARY_PERCOMPONENT_OP(name,floatfunc,dualfunc)         \
@@ -290,21 +325,37 @@ OSL_SHADEOP void osl_##name##_dvdvf (void *r_, void *a_, float b_)      \
 }
 
 
-
-MAKE_UNARY_PERCOMPONENT_OP (sin, sinf, sin)
-MAKE_UNARY_PERCOMPONENT_OP (cos, cosf, cos)
-MAKE_UNARY_PERCOMPONENT_OP (tan, tanf, tan)
-MAKE_UNARY_PERCOMPONENT_OP (asin, safe_asinf, asin)
-MAKE_UNARY_PERCOMPONENT_OP (acos, safe_acosf, acos)
-MAKE_UNARY_PERCOMPONENT_OP (atan, std::atan, atan)
-MAKE_BINARY_PERCOMPONENT_OP (atan2, std::atan2, atan2)
-MAKE_UNARY_PERCOMPONENT_OP (sinh, std::sinh, sinh)
-MAKE_UNARY_PERCOMPONENT_OP (cosh, std::cosh, cosh)
-MAKE_UNARY_PERCOMPONENT_OP (tanh, std::tanh, tanh)
+#if OSL_FAST_MATH
+MAKE_UNARY_PERCOMPONENT_OP (sin  , OIIO::fast_sin  , fast_sin )
+MAKE_UNARY_PERCOMPONENT_OP (cos  , OIIO::fast_cos  , fast_cos )
+MAKE_UNARY_PERCOMPONENT_OP (tan  , OIIO::fast_tan  , fast_tan )
+MAKE_UNARY_PERCOMPONENT_OP (asin , OIIO::fast_asin , fast_asin)
+MAKE_UNARY_PERCOMPONENT_OP (acos , OIIO::fast_acos , fast_acos)
+MAKE_UNARY_PERCOMPONENT_OP (atan , OIIO::fast_atan , fast_atan)
+MAKE_BINARY_PERCOMPONENT_OP(atan2, OIIO::fast_atan2, fast_atan2)
+MAKE_UNARY_PERCOMPONENT_OP (sinh , OIIO::fast_sinh , fast_sinh)
+MAKE_UNARY_PERCOMPONENT_OP (cosh , OIIO::fast_cosh , fast_cosh)
+MAKE_UNARY_PERCOMPONENT_OP (tanh , OIIO::fast_tanh , fast_tanh)
+#else
+MAKE_UNARY_PERCOMPONENT_OP (sin  , sinf      , sin  )
+MAKE_UNARY_PERCOMPONENT_OP (cos  , cosf      , cos  )
+MAKE_UNARY_PERCOMPONENT_OP (tan  , tanf      , tan  )
+MAKE_UNARY_PERCOMPONENT_OP (asin , safe_asin , safe_asin )
+MAKE_UNARY_PERCOMPONENT_OP (acos , safe_acos , safe_acos )
+MAKE_UNARY_PERCOMPONENT_OP (atan , atanf     , atan )
+MAKE_BINARY_PERCOMPONENT_OP(atan2, atan2f    , atan2)
+MAKE_UNARY_PERCOMPONENT_OP (sinh , sinhf     , sinh )
+MAKE_UNARY_PERCOMPONENT_OP (cosh , coshf     , cosh )
+MAKE_UNARY_PERCOMPONENT_OP (tanh , tanhf     , tanh )
+#endif
 
 OSL_SHADEOP void osl_sincos_fff(float x, void *s_, void *c_)
 {
+#if OSL_FAST_MATH
+    OIIO::fast_sincos(x, (float *)s_, (float *)c_);
+#else
     OIIO::sincos(x, (float *)s_, (float *)c_);
+#endif
 }
 
 OSL_SHADEOP void osl_sincos_dfdff(void *x_, void *s_, void *c_)
@@ -314,7 +365,12 @@ OSL_SHADEOP void osl_sincos_dfdff(void *x_, void *s_, void *c_)
     float        &cosine = *(float *)c_;
 
     float s_f, c_f;
+#if OSL_FAST_MATH
+    OIIO::fast_sincos(x.val(), &s_f, &c_f);
+#else
     OIIO::sincos(x.val(), &s_f, &c_f);
+#endif
+
     float xdx = x.dx(), xdy = x.dy(); // x might be aliased
     sine   = Dual2<float>(s_f,  c_f * xdx,  c_f * xdy);
     cosine = c_f;
@@ -327,7 +383,11 @@ OSL_SHADEOP void osl_sincos_dffdf(void *x_, void *s_, void *c_)
     Dual2<float> &cosine = DFLOAT(c_);
 
     float s_f, c_f;
+#if OSL_FAST_MATH
+    OIIO::fast_sincos(x.val(), &s_f, &c_f);
+#else
     OIIO::sincos(x.val(), &s_f, &c_f);
+#endif
     float xdx = x.dx(), xdy = x.dy(); // x might be aliased
     sine   = s_f;
     cosine = Dual2<float>(c_f, -s_f * xdx, -s_f * xdy);
@@ -340,7 +400,11 @@ OSL_SHADEOP void osl_sincos_dfdfdf(void *x_, void *s_, void *c_)
     Dual2<float> &cosine = DFLOAT(c_);
 
     float s_f, c_f;
+#if OSL_FAST_MATH
+    OIIO::fast_sincos(x.val(), &s_f, &c_f);
+#else
     OIIO::sincos(x.val(), &s_f, &c_f);
+#endif
     float xdx = x.dx(), xdy = x.dy(); // x might be aliased
     sine   = Dual2<float>(s_f,  c_f * xdx,  c_f * xdy);
     cosine = Dual2<float>(c_f, -s_f * xdx, -s_f * xdy);
@@ -360,7 +424,11 @@ OSL_SHADEOP void osl_sincos_dvdvv(void *x_, void *s_, void *c_)
 
     for (int i = 0; i < 3; i++) {
         float s_f, c_f;
+#if OSL_FAST_MATH
+        OIIO::fast_sincos(x.val()[i], &s_f, &c_f);
+#else
         OIIO::sincos(x.val()[i], &s_f, &c_f);
+#endif
         float xdx = x.dx()[i], xdy = x.dy()[i]; // x might be aliased
         sine.val()[i] = s_f; sine.dx()[i] =  c_f * xdx; sine.dy()[i] =  c_f * xdy;
         cosine[i] = c_f;
@@ -375,7 +443,11 @@ OSL_SHADEOP void osl_sincos_dvvdv(void *x_, void *s_, void *c_)
 
     for (int i = 0; i < 3; i++) {
         float s_f, c_f;
+#if OSL_FAST_MATH
+        OIIO::fast_sincos(x.val()[i], &s_f, &c_f);
+#else
         OIIO::sincos(x.val()[i], &s_f, &c_f);
+#endif
         float xdx = x.dx()[i], xdy = x.dy()[i]; // x might be aliased
         sine[i] = s_f;
         cosine.val()[i] = c_f; cosine.dx()[i] = -s_f * xdx; cosine.dy()[i] = -s_f * xdy;
@@ -390,98 +462,48 @@ OSL_SHADEOP void osl_sincos_dvdvdv(void *x_, void *s_, void *c_)
 
     for (int i = 0; i < 3; i++) {
         float s_f, c_f;
+#if OSL_FAST_MATH
+        OIIO::fast_sincos(x.val()[i], &s_f, &c_f);
+#else
         OIIO::sincos(x.val()[i], &s_f, &c_f);
+#endif
         float xdx = x.dx()[i], xdy = x.dy()[i]; // x might be aliased
           sine.val()[i] = s_f;   sine.dx()[i] =  c_f * xdx;   sine.dy()[i] =  c_f * xdy;
         cosine.val()[i] = c_f; cosine.dx()[i] = -s_f * xdx; cosine.dy()[i] = -s_f * xdy;
     }
 }
 
-
-
-inline float safe_log (float f) {
-    if (f <= 0.0f)
-        return -std::numeric_limits<float>::max();
-    else
-        return std::log (f);
-}
-
-inline float safe_log2(float x) {
-    if (x <= 0.0f)
-        return -std::numeric_limits<float>::max();
-    else
-        return log2f(x);
-}
-
-inline float safe_log10(float x) {
-    if (x <= 0.0f)
-        return -std::numeric_limits<float>::max();
-    else
-        return log10f(x);
-}
-
-inline float safe_logb (float f) {
-    if (f == 0.0f) {
-        // m_exec->error ("attempted to compute logb(%g)", f);
-        return -std::numeric_limits<float>::max();
-    } else {
-        return logbf (f);
-    }
-}
-
-inline Dual2<float> logb (const Dual2<float> &f) {
-    // FIXME - punt on derivs
-    return Dual2<float> (safe_logb(f.val()), 0.0, 0.0);
-}
-
-inline float fast_expf(float x) {
-#if defined(__GNU_LIBRARY__) && defined(__GLIBC__ ) && defined(__GLIBC_MINOR__) && __GLIBC__  <= 2 &&  __GLIBC_MINOR__ < 16
-   /// On Linux platforms using glibc < 2.16, the implementation of expf is unreasonably slow
-   /// It is much faster to use the double version instead and cast back to floats
-   return static_cast<float>(std::exp(static_cast<double>(x)));
+#if OSL_FAST_MATH
+MAKE_UNARY_PERCOMPONENT_OP     (log        , OIIO::fast_log       , fast_log)
+MAKE_UNARY_PERCOMPONENT_OP     (log2       , OIIO::fast_log2      , fast_log2)
+MAKE_UNARY_PERCOMPONENT_OP     (log10      , OIIO::fast_log10     , fast_log10)
+MAKE_UNARY_PERCOMPONENT_OP     (exp        , OIIO::fast_exp       , fast_exp)
+MAKE_UNARY_PERCOMPONENT_OP     (exp2       , OIIO::fast_exp2      , fast_exp2)
+MAKE_UNARY_PERCOMPONENT_OP     (expm1      , OIIO::fast_expm1     , fast_expm1)
+MAKE_BINARY_PERCOMPONENT_OP    (pow        , OIIO::fast_safe_pow  , fast_safe_pow)
+MAKE_BINARY_PERCOMPONENT_VF_OP (pow        , OIIO::fast_safe_pow  , fast_safe_pow)
+MAKE_UNARY_PERCOMPONENT_OP     (erf        , OIIO::fast_erf       , erf)
+MAKE_UNARY_PERCOMPONENT_OP     (erfc       , OIIO::fast_erfc      , erfc)
 #else
-   return std::exp(x);
+MAKE_UNARY_PERCOMPONENT_OP     (log        , OIIO::safe_log       , safe_log)
+MAKE_UNARY_PERCOMPONENT_OP     (log2       , OIIO::safe_log2      , safe_log2)
+MAKE_UNARY_PERCOMPONENT_OP     (log10      , OIIO::safe_log10     , safe_log10)
+MAKE_UNARY_PERCOMPONENT_OP     (exp        , expf                 , exp)
+MAKE_UNARY_PERCOMPONENT_OP     (exp2       , exp2f                , exp2)
+MAKE_UNARY_PERCOMPONENT_OP     (expm1      , expm1f               , expm1)
+MAKE_BINARY_PERCOMPONENT_OP    (pow        , OIIO::safe_pow       , safe_pow)
+MAKE_BINARY_PERCOMPONENT_VF_OP (pow        , OIIO::safe_pow       , safe_pow)
+MAKE_UNARY_PERCOMPONENT_OP     (erf        , erff                 , erf)
+MAKE_UNARY_PERCOMPONENT_OP     (erfc       , erfcf                , erfc)
 #endif
+MAKE_UNARY_PERCOMPONENT_OP     (sqrt       , OIIO::safe_sqrt      , sqrt)
+MAKE_UNARY_PERCOMPONENT_OP     (inversesqrt, OIIO::safe_inversesqrt, inversesqrt)
+
+OSL_SHADEOP float osl_logb_ff (float x) { return OIIO::fast_logb(x); }
+OSL_SHADEOP void osl_logb_vv (void *r, void *x_) {
+    const Vec3 &x (VEC(x_));
+    VEC(r).setValue (OIIO::fast_logb(x[0]), OIIO::fast_logb(x[1]), OIIO::fast_logb(x[2]));
 }
-
-inline Dual2<float> fast_expf(const Dual2<float>& a) {
-   float expa = fast_expf(a.val());
-   return Dual2<float> (expa, expa * a.dx(), expa * a.dy());
-
-}
-
-
-MAKE_UNARY_PERCOMPONENT_OP (log, safe_log, log)
-MAKE_UNARY_PERCOMPONENT_OP (log2, safe_log2, log2)
-MAKE_UNARY_PERCOMPONENT_OP (log10, safe_log10, log10)
-MAKE_UNARY_PERCOMPONENT_OP (logb, safe_logb, logb)
-MAKE_UNARY_PERCOMPONENT_OP (exp, fast_expf, fast_expf)
-MAKE_UNARY_PERCOMPONENT_OP (exp2, exp2f, exp2)
-MAKE_UNARY_PERCOMPONENT_OP (expm1, expm1f, expm1)
-MAKE_BINARY_PERCOMPONENT_OP (pow, safe_pow, pow)
-MAKE_BINARY_PERCOMPONENT_VF_OP (pow, safe_pow, pow)
-MAKE_UNARY_PERCOMPONENT_OP (erf, erff, erf)
-MAKE_UNARY_PERCOMPONENT_OP (erfc, erfcf, erfc)
-
-
-inline float safe_sqrt (float f) {
-    if (f <= 0.0f) {
-        return 0.0f;
-    } else {
-        return std::sqrt (f);
-    }
-}
-
-inline float safe_inversesqrt (float f) {
-    if (f <= 0.0f) {
-        return 0.0f;
-    } else {
-        return 1.0f/sqrtf (f);
-    }
-}
-
-MAKE_UNARY_PERCOMPONENT_OP (sqrt, safe_sqrt, sqrt)
-MAKE_UNARY_PERCOMPONENT_OP (inversesqrt, safe_inversesqrt, inversesqrt)
 
 OSL_SHADEOP float osl_floor_ff (float x) { return floorf(x); }
 OSL_SHADEOP void osl_floor_vv (void *r, void *x_) {
@@ -520,9 +542,9 @@ OSL_SHADEOP void osl_step_vvv (void *result, void *edge, void *x) {
 
 }
 
-OSL_SHADEOP int osl_isnan_if (float f) { return isnan (f); }
-OSL_SHADEOP int osl_isinf_if (float f) { return isinf (f); }
-OSL_SHADEOP int osl_isfinite_if (float f) { return isfinite (f); }
+OSL_SHADEOP int osl_isnan_if (float f) { return OIIO::isnan (f); }
+OSL_SHADEOP int osl_isinf_if (float f) { return OIIO::isinf (f); }
+OSL_SHADEOP int osl_isfinite_if (float f) { return OIIO::isfinite (f); }
 
 
 OSL_SHADEOP int osl_abs_ii (int x) { return abs(x); }
@@ -618,45 +640,45 @@ OSL_SHADEOP void osl_smoothstep_dfdfdfdf(void *result, void* e0_, void* e1_, voi
 // point = M * point
 OSL_SHADEOP void osl_transform_vmv(void *result, void* M_, void* v_)
 {
-   Vec3 v = VEC(v_);
-   Matrix44 M = MAT(M_);
+   const Vec3 &v = VEC(v_);
+   const Matrix44 &M = MAT(M_);
    robust_multVecMatrix (M, v, VEC(result));
 }
 
 OSL_SHADEOP void osl_transform_dvmdv(void *result, void* M_, void* v_)
 {
-   Dual2<Vec3> v = DVEC(v_);
-   Matrix44    M = MAT(M_);
+   const Dual2<Vec3> &v = DVEC(v_);
+   const Matrix44    &M = MAT(M_);
    robust_multVecMatrix (M, v, DVEC(result));
 }
 
 // vector = M * vector
 OSL_SHADEOP void osl_transformv_vmv(void *result, void* M_, void* v_)
 {
-   Vec3 v = VEC(v_);
-   Matrix44 M = MAT(M_);
+   const Vec3 &v = VEC(v_);
+   const Matrix44 &M = MAT(M_);
    M.multDirMatrix (v, VEC(result));
 }
 
 OSL_SHADEOP void osl_transformv_dvmdv(void *result, void* M_, void* v_)
 {
-   Dual2<Vec3> v = DVEC(v_);
-   Matrix44    M = MAT(M_);
+   const Dual2<Vec3> &v = DVEC(v_);
+   const Matrix44    &M = MAT(M_);
    multDirMatrix (M, v, DVEC(result));
 }
 
 // normal = M * normal
 OSL_SHADEOP void osl_transformn_vmv(void *result, void* M_, void* v_)
 {
-   Vec3 v = VEC(v_);
-   Matrix44 M = MAT(M_);
+   const Vec3 &v = VEC(v_);
+   const Matrix44 &M = MAT(M_);
    M.inverse().transpose().multDirMatrix (v, VEC(result));
 }
 
 OSL_SHADEOP void osl_transformn_dvmdv(void *result, void* M_, void* v_)
 {
-   Dual2<Vec3> v = DVEC(v_);
-   Matrix44    M = MAT(M_);
+   const Dual2<Vec3> &v = DVEC(v_);
+   const Matrix44    &M = MAT(M_);
    multDirMatrix (M.inverse().transpose(), v, DVEC(result));
 }
 
@@ -708,80 +730,16 @@ osl_div_m_ff (void *r, float a, float b)
     MAT(r) = Matrix44 (f,0,0,0, 0,f,0,0, 0,0,f,0, 0,0,0,f);
 }
 
-bool
-osl_get_matrix (ShaderGlobals *sg, Matrix44 *r, const char *from)
-{
-    ShadingContext *ctx = (ShadingContext *)sg->context;
-    if (USTR(from) == Strings::common ||
-            USTR(from) == ctx->shadingsys().commonspace_synonym()) {
-        r->makeIdentity ();
-        return true;
-    }
-    if (USTR(from) == Strings::shader) {
-        sg->renderer->get_matrix (*r, sg->shader2common, sg->time);
-        return true;
-    }
-    if (USTR(from) == Strings::object) {
-        sg->renderer->get_matrix (*r, sg->object2common, sg->time);
-        return true;
-    }
-    bool ok = sg->renderer->get_matrix (*r, USTR(from), sg->time);
-    if (! ok) {
-        r->makeIdentity();
-        ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
-        if (ctx->shadingsys().unknown_coordsys_error())
-            ctx->shadingsys().error ("Unknown transformation \"%s\"", from);
-    }
-    return ok;
-}
+OSL_SHADEOP int osl_get_matrix (void *sg, void *r, const char *from);
+OSL_SHADEOP int osl_get_inverse_matrix (void *sg, void *r, const char *to);
+OSL_SHADEOP int osl_prepend_matrix_from (void *sg, void *r, const char *from);
 
-bool
-osl_get_inverse_matrix (ShaderGlobals *sg, Matrix44 *r, const char *to)
-{
-    ShadingContext *ctx = (ShadingContext *)sg->context;
-    if (USTR(to) == Strings::common ||
-            USTR(to) == ctx->shadingsys().commonspace_synonym()) {
-        r->makeIdentity ();
-        return true;
-    }
-    if (USTR(to) == Strings::shader) {
-        sg->renderer->get_inverse_matrix (*r, sg->shader2common, sg->time);
-        return true;
-    }
-    if (USTR(to) == Strings::object) {
-        sg->renderer->get_inverse_matrix (*r, sg->object2common, sg->time);
-        return true;
-    }
-    bool ok = sg->renderer->get_inverse_matrix (*r, USTR(to), sg->time);
-    if (! ok) {
-        r->makeIdentity ();
-        ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
-        if (ctx->shadingsys().unknown_coordsys_error())
-            ctx->shadingsys().error ("Unknown transformation \"%s\"", to);
-    }
-    return ok;
-}
-
-OSL_SHADEOP int
-osl_prepend_matrix_from (void *sg, void *r, const char *from)
-{
-    Matrix44 m;
-    bool ok = osl_get_matrix ((ShaderGlobals *)sg, &m, from);
-    if (ok)
-        MAT(r) = m * MAT(r);
-    else {
-        ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
-        if (ctx->shadingsys().unknown_coordsys_error())
-            ctx->shadingsys().error ("Unknown transformation \"%s\"", from);
-    }
-    return ok;
-}
 
 OSL_SHADEOP int
 osl_get_from_to_matrix (void *sg, void *r, const char *from, const char *to)
 {
     Matrix44 Mfrom, Mto;
-    bool ok = osl_get_matrix ((ShaderGlobals *)sg, &Mfrom, from);
+    int ok = osl_get_matrix ((ShaderGlobals *)sg, &Mfrom, from);
     ok &= osl_get_inverse_matrix ((ShaderGlobals *)sg, &Mto, to);
     MAT(r) = Mfrom * Mto;
     return ok;
@@ -794,13 +752,14 @@ osl_transform_triple (void *sg_, void *Pin, int Pin_derivs,
                       void *Pout, int Pout_derivs,
                       void *from, void *to, int vectype)
 {
+    static ustring u_common ("common");
     ShaderGlobals *sg = (ShaderGlobals *)sg_;
     Matrix44 M;
-    bool ok;
+    int ok;
     Pin_derivs &= Pout_derivs;   // ignore derivs if output doesn't need it
-    if (USTR(from) == Strings::common)
+    if (USTR(from) == u_common)
         ok = osl_get_inverse_matrix (sg, &M, (const char *)to);
-    else if (USTR(to) == Strings::common)
+    else if (USTR(to) == u_common)
         ok = osl_get_matrix (sg, &M, (const char *)from);
     else
         ok = osl_get_from_to_matrix (sg, &M, (const char *)from,
@@ -846,7 +805,6 @@ osl_transform_triple_nonlinear (void *sg_, void *Pin, int Pin_derivs,
                                 int vectype)
 {
     ShaderGlobals *sg = (ShaderGlobals *)sg_;
-    ShadingContext *ctx = (ShadingContext *)sg->context;
     RendererServices *rend = sg->renderer;
     if (rend->transform_points (sg, USTR(from), USTR(to), sg->time,
                                 (const Vec3 *)Pin, (Vec3 *)Pout, 1,
@@ -1034,17 +992,6 @@ osl_normalize_dvdv (void *result, void *a)
 
 
 
-OSL_SHADEOP void
-osl_prepend_color_from (void *sg, void *c_, const char *from)
-{
-    ShadingContext *ctx (((ShaderGlobals *)sg)->context);
-    Color3 &c (COL(c_));
-    c = ctx->shadingsys().to_rgb (USTR(from), c[0], c[1], c[2]);
-}
-
-
-
-
 // String ops
 
 // Only define 2-arg version of concat, sort it out upstream
@@ -1100,17 +1047,16 @@ osl_substr_ssii (const char *s, int start, int length)
 }
 
 OSL_SHADEOP int
-osl_regex_impl (void *sg_, const char *subject_, void *results, int nresults,
+osl_regex_impl (void *sg_, const char *subject, void *results, int nresults,
                 const char *pattern, int fullmatch)
 {
-    extern int osl_regex_impl2 (OSL::ShadingContext *ctx, ustring subject,
-                               int *results, int nresults, ustring pattern,
+    extern int osl_regex_impl2 (void *ctx, const char *subject,
+                               void *results, int nresults, const char *pattern,
                                int fullmatch);
 
     ShaderGlobals *sg = (ShaderGlobals *)sg_;
-    return osl_regex_impl2 (sg->context, USTR(subject_),
-                            (int *)results, nresults,
-                            USTR(pattern), fullmatch);
+    return osl_regex_impl2 (sg->context, subject, results, nresults,
+                            pattern, fullmatch);
 }
 
 
@@ -1154,6 +1100,14 @@ osl_texture_set_rwrap (void *opt, const char *x)
 }
 
 OSL_SHADEOP void
+osl_texture_set_stwrap (void *opt, const char *x)
+{
+    TextureOpt::Wrap code = TextureOpt::decode_wrapmode(USTR(x));
+    ((TextureOpt *)opt)->swrap = code;
+    ((TextureOpt *)opt)->twrap = code;
+}
+
+OSL_SHADEOP void
 osl_texture_set_swrap_code (void *opt, int mode)
 {
     ((TextureOpt *)opt)->swrap = (TextureOpt::Wrap)mode;
@@ -1169,6 +1123,13 @@ OSL_SHADEOP void
 osl_texture_set_rwrap_code (void *opt, int mode)
 {
     ((TextureOpt *)opt)->rwrap = (TextureOpt::Wrap)mode;
+}
+
+OSL_SHADEOP void
+osl_texture_set_stwrap_code (void *opt, int mode)
+{
+    ((TextureOpt *)opt)->swrap = (TextureOpt::Wrap)mode;
+    ((TextureOpt *)opt)->twrap = (TextureOpt::Wrap)mode;
 }
 
 OSL_SHADEOP void
@@ -1190,6 +1151,13 @@ osl_texture_set_rblur (void *opt, float x)
 }
 
 OSL_SHADEOP void
+osl_texture_set_stblur (void *opt, float x)
+{
+    ((TextureOpt *)opt)->sblur = x;
+    ((TextureOpt *)opt)->tblur = x;
+}
+
+OSL_SHADEOP void
 osl_texture_set_swidth (void *opt, float x)
 {
     ((TextureOpt *)opt)->swidth = x;
@@ -1208,6 +1176,13 @@ osl_texture_set_rwidth (void *opt, float x)
 }
 
 OSL_SHADEOP void
+osl_texture_set_stwidth (void *opt, float x)
+{
+    ((TextureOpt *)opt)->swidth = x;
+    ((TextureOpt *)opt)->twidth = x;
+}
+
+OSL_SHADEOP void
 osl_texture_set_fill (void *opt, float x)
 {
     ((TextureOpt *)opt)->fill = x;
@@ -1220,7 +1195,7 @@ osl_texture_set_time (void *opt, float x)
 }
 
 OSL_SHADEOP void
-osl_texture_set_interp_name (void *opt, const char *modename)
+osl_texture_set_interp (void *opt, const char *modename)
 {
     int mode = tex_interp_to_code (USTR(modename));
     if (mode >= 0)
@@ -1270,25 +1245,36 @@ osl_texture (void *sg_, const char *name, void *opt_, float s, float t,
              float dsdx, float dtdx, float dsdy, float dtdy, int chans,
              void *result, void *dresultdx, void *dresultdy)
 {
+    DASSERT ((dresultdx == NULL) == (dresultdy == NULL));
     ShaderGlobals *sg = (ShaderGlobals *)sg_;
     TextureOpt *opt = (TextureOpt *)opt_;
-    opt->nchannels = chans;
-    float dresultds[3], dresultdt[3];
-    opt->dresultds = dresultdx ? dresultds : NULL;
-    opt->dresultdt = dresultdy ? dresultdt : NULL;
-
+    // It's actually faster to ask for 4 channels (even if we need fewer)
+    // and ensure that they're being put in aligned memory.
+    OIIO::simd::float4 result_simd, dresultds_simd, dresultdt_simd;
+    bool derivs = (dresultdx != NULL);
     bool ok = sg->renderer->texture (USTR(name), *opt, sg, s, t,
-                                     dsdx, dtdx, dsdy, dtdy, (float *)result);
+                                     dsdx, dtdx, dsdy, dtdy,
+                                     4, (float *)&result_simd,
+                                     derivs ? (float *)&dresultds_simd : NULL,
+                                     derivs ? (float *)&dresultdt_simd : NULL);
 
     // Correct our st texture space gradients into xy-space gradients
-    if (dresultdx)
+    if (derivs) {
+        OIIO::simd::float4 dresultdx_simd = dresultds_simd * dsdx + dresultdt_simd * dtdx;
+        OIIO::simd::float4 dresultdy_simd = dresultds_simd * dsdy + dresultdt_simd * dtdy;
         for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdx)[i] = dresultds[i] * dsdx + dresultdt[i] * dtdx;
-    if (dresultdy)
+            ((float *)dresultdx)[i] = dresultdx_simd[i];
         for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdy)[i] = dresultds[i] * dsdy + dresultdt[i] * dtdy;
+            ((float *)dresultdy)[i] = dresultdy_simd[i];
+    }
+    ((float *)result)[0] = result_simd[0];
+    if (chans == 3) {
+        ((float *)result)[1] = result_simd[1];
+        ((float *)result)[2] = result_simd[2];
+    }
     return ok;
 }
+
 
 OSL_SHADEOP int
 osl_texture_alpha (void *sg_, const char *name, void *opt_, float s, float t,
@@ -1298,29 +1284,33 @@ osl_texture_alpha (void *sg_, const char *name, void *opt_, float s, float t,
 {
     ShaderGlobals *sg = (ShaderGlobals *)sg_;
     TextureOpt *opt = (TextureOpt *)opt_;
-    opt->nchannels = chans + 1;
-    float local_result[4], dresultds[4], dresultdt[4];
-    opt->dresultds = (dresultdx || dalphadx) ? dresultds : NULL;
-    opt->dresultdt = (dresultdy || dalphady) ? dresultdt : NULL;
-
+    bool derivs = (dresultdx != NULL);
+    // It's actually faster to ask for 4 channels (even if we need fewer)
+    // and ensure that they're being put in aligned memory.
+    OIIO::simd::float4 result_simd, dresultds_simd, dresultdt_simd;
     bool ok = sg->renderer->texture (USTR(name), *opt, sg, s, t,
-                                     dsdx, dtdx, dsdy, dtdy, local_result);
+                                     dsdx, dtdx, dsdy, dtdy, 4,
+                                     (float *)&result_simd,
+                                     derivs ? (float *)&dresultds_simd : NULL,
+                                     derivs ? (float *)&dresultdt_simd : NULL);
 
     for (int i = 0;  i < chans;  ++i)
-        ((float *)result)[i] = local_result[i];
-    ((float *)alpha)[0] = local_result[chans];
+        ((float *)result)[i] = result_simd[i];
+    ((float *)alpha)[0] = result_simd[chans];
 
     // Correct our st texture space gradients into xy-space gradients
-    if (dresultdx)
+    if (derivs) {
+        OIIO::simd::float4 dresultdx_simd = dresultds_simd * dsdx + dresultdt_simd * dtdx;
+        OIIO::simd::float4 dresultdy_simd = dresultds_simd * dsdy + dresultdt_simd * dtdy;
         for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdx)[i] = dresultds[i] * dsdx + dresultdt[i] * dtdx;
-    if (dresultdy)
+            ((float *)dresultdx)[i] = dresultdx_simd[i];
         for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdy)[i] = dresultds[i] * dsdy + dresultdt[i] * dtdy;
-    if (dalphadx)
-        ((float *)dalphadx)[0] = dresultds[chans] * dsdx + dresultdt[chans] * dtdx;
-    if (dalphady)
-        ((float *)dalphady)[0] = dresultds[chans] * dsdy + dresultdt[chans] * dtdy;
+            ((float *)dresultdy)[i] = dresultdy_simd[i];
+        if (dalphadx) {
+            ((float *)dalphadx)[0] = dresultdx_simd[chans];
+            ((float *)dalphady)[0] = dresultdy_simd[chans];
+        }
+    }
 
     return ok;
 }
@@ -1338,25 +1328,31 @@ osl_texture3d (void *sg_, const char *name, void *opt_, void *P_,
     const Vec3 &dPdz (*(Vec3 *)dPdz_);
     ShaderGlobals *sg = (ShaderGlobals *)sg_;
     TextureOpt *opt = (TextureOpt *)opt_;
-    opt->nchannels = chans;
-    float dresultds[3], dresultdt[3], dresultdr[3];
-    opt->dresultds = dresultdx ? dresultds : NULL;
-    opt->dresultdt = dresultdy ? dresultdt : NULL;
-    opt->dresultdr = dresultdz ? dresultdr : NULL;
-
+    bool derivs = (dresultdx != NULL);
+    // It's actually faster to ask for 4 channels (even if we need fewer)
+    // and ensure that they're being put in aligned memory.
+    OIIO::simd::float4 result_simd, dresultds_simd, dresultdt_simd, dresultdr_simd;
     bool ok = sg->renderer->texture3d (USTR(name), *opt, sg, P,
-                                       dPdx, dPdy, dPdz, (float *)result);
+                                       dPdx, dPdy, dPdz,
+                                       4, (float *)&result_simd,
+                                       derivs ? (float *)&dresultds_simd : NULL,
+                                       derivs ? (float *)&dresultdt_simd : NULL,
+                                       derivs ? (float *)&dresultdr_simd : NULL);
 
     // Correct our str texture space gradients into xyz-space gradients
-    if (dresultdx)
+    for (int i = 0;  i < chans;  ++i)
+        ((float *)result)[i] = result_simd[i];
+    if (derivs) {
+        OIIO::simd::float4 dresultdx_simd = dresultds_simd * dPdx[0] + dresultdt_simd * dPdx[1] + dresultdr_simd * dPdx[2];
+        OIIO::simd::float4 dresultdy_simd = dresultds_simd * dPdy[0] + dresultdt_simd * dPdy[1] + dresultdr_simd * dPdy[2];
+        OIIO::simd::float4 dresultdz_simd = dresultds_simd * dPdz[0] + dresultdt_simd * dPdz[1] + dresultdr_simd * dPdz[2];
         for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdx)[i] = dresultds[i] * dPdx[0] + dresultdt[i] * dPdx[1] + dresultdr[i] * dPdx[2];
-    if (dresultdy)
+            ((float *)dresultdx)[i] = dresultdx_simd[i];
         for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdy)[i] = dresultds[i] * dPdy[0] + dresultdt[i] * dPdy[1] + dresultdr[i] * dPdy[2];
-    if (dresultdz)
+            ((float *)dresultdy)[i] = dresultdy_simd[i];
         for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdz)[i] = dresultds[i] * dPdz[0] + dresultdt[i] * dPdz[1] + dresultdr[i] * dPdz[2];
+            ((float *)dresultdz)[i] = dresultdz_simd[i];
+    }
     return ok;
 }
 
@@ -1375,36 +1371,40 @@ osl_texture3d_alpha (void *sg_, const char *name, void *opt_, void *P_,
     const Vec3 &dPdz (*(Vec3 *)dPdz_);
     ShaderGlobals *sg = (ShaderGlobals *)sg_;
     TextureOpt *opt = (TextureOpt *)opt_;
-    opt->nchannels = chans + 1;
-    float local_result[4], dresultds[4], dresultdt[4], dresultdr[4];
-    opt->dresultds = (dresultdx || dalphadx) ? dresultds : NULL;
-    opt->dresultdt = (dresultdy || dalphady) ? dresultdt : NULL;
-    opt->dresultdr = (dresultdz || dalphadz) ? dresultdr : NULL;
-
+    bool derivs = (dresultdx != NULL || dalphadx != NULL);
+    // It's actually faster to ask for 4 channels (even if we need fewer)
+    // and ensure that they're being put in aligned memory.
+    OIIO::simd::float4 result_simd, dresultds_simd, dresultdt_simd, dresultdr_simd;
     bool ok = sg->renderer->texture3d (USTR(name), *opt, sg, P,
-                                       dPdx, dPdy, dPdz, (float *)local_result);
+                                       dPdx, dPdy, dPdz,
+                                       4, (float *)&result_simd,
+                                       derivs ? (float *)&dresultds_simd : NULL,
+                                       derivs ? (float *)&dresultdt_simd : NULL,
+                                       derivs ? (float *)&dresultdr_simd : NULL);
 
     for (int i = 0;  i < chans;  ++i)
-        ((float *)result)[i] = local_result[i];
-    ((float *)alpha)[0] = local_result[chans];
+        ((float *)result)[i] = result_simd[i];
+    ((float *)alpha)[0] = result_simd[chans];
 
     // Correct our str texture space gradients into xyz-space gradients
-    if (dresultdx)
-        for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdx)[i] = dresultds[i] * dPdx[0] + dresultdt[i] * dPdx[1] + dresultdr[i] * dPdx[2];
-    if (dresultdy)
-        for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdy)[i] = dresultds[i] * dPdy[0] + dresultdt[i] * dPdy[1] + dresultdr[i] * dPdy[2];
-    if (dresultdz)
-        for (int i = 0;  i < chans;  ++i)
-            ((float *)dresultdz)[i] = dresultds[i] * dPdz[0] + dresultdt[i] * dPdz[1] + dresultdr[i] * dPdz[2];
-    if (dalphadx)
-        ((float *)dalphadx)[0] = dresultds[chans] * dPdx[0] + dresultdt[chans] * dPdx[1] + dresultdr[chans] * dPdx[2];
-    if (dalphady)
-        ((float *)dalphady)[0] = dresultds[chans] * dPdy[0] + dresultdt[chans] * dPdy[1] + dresultdr[chans] * dPdy[2];
-    if (dalphadz)
-        ((float *)dalphadz)[0] = dresultds[chans] * dPdz[0] + dresultdt[chans] * dPdz[1] + dresultdr[chans] * dPdz[2];
-
+    if (derivs) {
+        OIIO::simd::float4 dresultdx_simd = dresultds_simd * dPdx[0] + dresultdt_simd * dPdx[1] + dresultdr_simd * dPdx[2];
+        OIIO::simd::float4 dresultdy_simd = dresultds_simd * dPdy[0] + dresultdt_simd * dPdy[1] + dresultdr_simd * dPdy[2];
+        OIIO::simd::float4 dresultdz_simd = dresultds_simd * dPdz[0] + dresultdt_simd * dPdz[1] + dresultdr_simd * dPdz[2];
+        if (dresultdx) {
+            for (int i = 0;  i < chans;  ++i)
+                ((float *)dresultdx)[i] = dresultdx_simd[i];
+            for (int i = 0;  i < chans;  ++i)
+                ((float *)dresultdy)[i] = dresultdy_simd[i];
+            for (int i = 0;  i < chans;  ++i)
+                ((float *)dresultdz)[i] = dresultdz_simd[i];
+        }
+        if (dalphadx) {
+            ((float *)dalphadx)[0] = dresultdx_simd[chans];
+            ((float *)dalphady)[0] = dresultdy_simd[chans];
+            ((float *)dalphadz)[0] = dresultdz_simd[chans];
+        }
+    }
     return ok;
 }
 
@@ -1421,14 +1421,12 @@ osl_environment (void *sg_, const char *name, void *opt_, void *R_,
     const Vec3 &dRdy (*(Vec3 *)dRdy_);
     ShaderGlobals *sg = (ShaderGlobals *)sg_;
     TextureOpt *opt = (TextureOpt *)opt_;
-    opt->nchannels = chans + (alpha ? 1 : 0);
-    float dresultds[4], dresultdt[4];
-    opt->dresultds = dresultdx ? dresultds : NULL;
-    opt->dresultdt = dresultdy ? dresultdt : NULL;
-    float local_result[4];
-
+    // It's actually faster to ask for 4 channels (even if we need fewer)
+    // and ensure that they're being put in aligned memory.
+    OIIO::simd::float4 local_result;
     bool ok = sg->renderer->environment (USTR(name), *opt, sg, R,
-                                         dRdx, dRdy, (float *)local_result);
+                                         dRdx, dRdy, 4,
+                                         (float *)&local_result, NULL, NULL);
 
     for (int i = 0;  i < chans;  ++i)
         ((float *)result)[i] = local_result[i];
@@ -1440,11 +1438,12 @@ osl_environment (void *sg_, const char *name, void *opt_, void *R_,
     // tricky because we (this function you're reading) don't know which
     // projection is used to generate st from R.  Ugh.  Sweep under the
     // rug for a day when somebody is really asking for it.
-    if (dresultdx)
-        ((float *)dresultdx)[0] = 0.0f;
-    if (dresultdy)
-        ((float *)dresultdy)[0] = 0.0f;
-
+    if (dresultdx) {
+        for (int i = 0;  i < chans;  ++i)
+            ((float *)dresultdx)[i] = 0.0f;
+        for (int i = 0;  i < chans;  ++i)
+            ((float *)dresultdy)[i] = 0.0f;
+    }
     if (alpha) {
         ((float *)alpha)[0] = local_result[chans];
         // Zero out the alpha derivatives, for the same reason as above.
@@ -1474,7 +1473,7 @@ OSL_SHADEOP int osl_get_textureinfo(void *sg_,    void *fin_,
     const ustring &filename  = USTR(fin_);
     const ustring &dataname  = USTR(dnam_);
 
-    return sg->renderer->get_texture_info (filename, 0 /*FIXME-ptex*/,
+    return sg->renderer->get_texture_info (sg, filename, 0 /*FIXME-ptex*/,
                                            dataname, typedesc, data);
 }
 
@@ -1583,28 +1582,6 @@ osl_trace (void *sg_, void *opt_, void *Pos_, void *dPosdx_, void *dPosdy_,
 
 
 
-OSL_SHADEOP int osl_get_attribute(void *sg_,
-                             int   dest_derivs,
-                             void *obj_name_,
-                             void *attr_name_,
-                             int   array_lookup,
-                             int   index,
-                             const void *attr_type,
-                             void *attr_dest)
-{
-    ShaderGlobals *sg   = (ShaderGlobals *)sg_;
-    const ustring &obj_name  = USTR(obj_name_);
-    const ustring &attr_name = USTR(attr_name_);
-
-    return sg->context->osl_get_attribute (sg->renderstate, sg->objdata,
-                                           dest_derivs, obj_name, attr_name,
-                                           array_lookup, index,
-                                           *(const TypeDesc *)attr_type,
-                                           attr_dest);
-}
-
-
-
 inline Vec3 calculatenormal(void *P_, bool flipHandedness)
 {
     Dual2<Vec3> &tmpP (DVEC(P_));
@@ -1652,43 +1629,7 @@ OSL_SHADEOP void osl_filterwidth_vdv(void *out, void *x_)
 
 
 
-OSL_SHADEOP int osl_dict_find_iis (void *sg_, int nodeID, void *query)
-{
-    ShaderGlobals *sg = (ShaderGlobals *)sg_;
-    return sg->context->dict_find (nodeID, USTR(query));
-}
 
-
-OSL_SHADEOP int osl_dict_find_iss (void *sg_, void *dictionary, void *query)
-{
-    ShaderGlobals *sg = (ShaderGlobals *)sg_;
-    return sg->context->dict_find (USTR(dictionary), USTR(query));
-}
-
-
-OSL_SHADEOP int osl_dict_next (void *sg_, int nodeID)
-{
-    ShaderGlobals *sg = (ShaderGlobals *)sg_;
-    return sg->context->dict_next (nodeID);
-}
-
-
-OSL_SHADEOP int osl_dict_value (void *sg_, int nodeID, void *attribname,
-                               long long type, void *data)
-{
-    ShaderGlobals *sg = (ShaderGlobals *)sg_;
-    return sg->context->dict_value (nodeID, USTR(attribname), TYPEDESC(type), data);
-}
-
-
-
-// Asked if the raytype is a name we can't know until mid-shader.
-OSL_SHADEOP int osl_raytype_name (void *sg_, void *name)
-{
-    ShaderGlobals *sg = (ShaderGlobals *)sg_;
-    int bit = sg->context->shadingsys().raytype_bit (USTR(name));
-    return (sg->raytype & bit) != 0;
-}
 
 // Asked if the raytype includes a bit pattern.
 OSL_SHADEOP int osl_raytype_bit (void *sg_, int bit)
@@ -1706,123 +1647,27 @@ OSL_SHADEOP int osl_raytype_bit (void *sg_, int bit)
 
 OSL_SHADEOP int
 osl_bind_interpolated_param (void *sg_, const void *name, long long type,
-                             int has_derivs, void *result)
+                             int userdata_has_derivs, void *userdata_data,
+                             int symbol_has_derivs, void *symbol_data,
+                             int symbol_data_size,
+                             char *userdata_initialized, int userdata_index)
 {
-    ShaderGlobals *sg = (ShaderGlobals *)sg_;
-    return sg->renderer->get_userdata (has_derivs, USTR(name), TYPEDESC(type),
-                                       sg->renderstate, result);
+    char status = *userdata_initialized;
+    if (status == 0) {
+        // First time retrieving this userdata
+        ShaderGlobals *sg = (ShaderGlobals *)sg_;
+        bool ok = sg->renderer->get_userdata (userdata_has_derivs, USTR(name),
+                                              TYPEDESC(type),
+                                              sg, userdata_data);
+        // printf ("Binding %s %s : index %d, ok = %d\n", name,
+        //         TYPEDESC(type).c_str(),userdata_index, ok);
+        *userdata_initialized = status = 1 + ok;  // 1 = not found, 2 = found
+    }
+    if (status == 2) {
+        // If userdata was present, copy it to the shader variable
+        memcpy (symbol_data, userdata_data, symbol_data_size);
+        return 1;
+    }
+    return 0;  // no such user data
 }
 
-
-
-OSL_SHADEOP int
-osl_range_check (int indexvalue, int length,
-                 void *sg, const void *sourcefile, int sourceline)
-{
-    if (indexvalue < 0 || indexvalue >= length) {
-        ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
-        ctx->shadingsys().error ("Index [%d] out of range [0..%d]: %s:%d",
-                                 indexvalue, length-1,
-                                 USTR(sourcefile).c_str(), sourceline);
-        if (indexvalue >= length)
-            indexvalue = length-1;
-        else
-            indexvalue = 0;
-    }
-    return indexvalue;
-}
-
-
-
-// vals points to a symbol with a total of ncomps floats (ncomps ==
-// aggregate*arraylen).  If has_derivs is true, it's actually 3 times
-// that length, the main values then the derivatives.  We want to check
-// for nans in vals[firstcheck..firstcheck+nchecks-1], and also in the
-// derivatives if present.  Note that if firstcheck==0 and nchecks==ncomps,
-// we are checking the entire contents of the symbol.  More restrictive
-// firstcheck,nchecks are used to check just one element of an array.
-OSL_SHADEOP void
-osl_naninf_check (int ncomps, const void *vals_, int has_derivs,
-                  void *sg, const void *sourcefile, int sourceline,
-                  void *symbolname, int firstcheck, int nchecks)
-{
-    ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
-    const float *vals = (const float *)vals_;
-    for (int d = 0;  d < (has_derivs ? 3 : 1);  ++d) {
-        for (int c = firstcheck, e = c+nchecks; c < e;  ++c) {
-            int i = d*ncomps + c;
-            if (! isfinite(vals[i])) {
-                ctx->shadingsys().error ("Detected %g value in %s%s at %s:%d",
-                                         vals[i],
-                                         d > 0 ? "the derivatives of " : "",
-                                         USTR(symbolname).c_str(),
-                                         USTR(sourcefile).c_str(), sourceline);
-                return;
-            }
-        }
-    }
-}
-
-
-
-// vals points to the data of a float-, int-, or string-based symbol.
-// (described by typedesc).  We want to check
-// vals[firstcheck..firstcheck+nchecks-1] for floats that are NaN , or
-// ints that are -MAXINT, or strings that are "!!!uninitialized!!!"
-// which would indicate that the value is uninitialized if
-// 'debug_uninit' is turned on.  Note that if firstcheck==0 and
-// nchecks==ncomps, we are checking the entire contents of the symbol.
-// More restrictive firstcheck,nchecks are used to check just one
-// element of an array.
-OSL_SHADEOP void
-osl_uninit_check (long long typedesc_, void *vals_,
-                  void *sg, const void *sourcefile, int sourceline,
-                  void *symbolname, int firstcheck, int nchecks)
-{
-    TypeDesc typedesc = TYPEDESC(typedesc_);
-    ShadingContext *ctx = (ShadingContext *)((ShaderGlobals *)sg)->context;
-    bool uninit = false;
-    if (typedesc.basetype == TypeDesc::FLOAT) {
-        float *vals = (float *)vals_;
-        for (int c = firstcheck, e = firstcheck+nchecks; c < e;  ++c)
-            if (!isfinite(vals[c])) {
-                uninit = true;
-                vals[c] = 0;
-            }
-    }
-    if (typedesc.basetype == TypeDesc::INT) {
-        int *vals = (int *)vals_;
-        for (int c = firstcheck, e = firstcheck+nchecks; c < e;  ++c)
-            if (vals[c] == std::numeric_limits<int>::min()) {
-                uninit = true;
-                vals[c] = 0;
-            }
-    }
-    if (typedesc.basetype == TypeDesc::STRING) {
-        ustring *vals = (ustring *)vals_;
-        for (int c = firstcheck, e = firstcheck+nchecks; c < e;  ++c)
-            if (vals[c] == Strings::uninitialized_string) {
-                uninit = true;
-                vals[c] = ustring();
-            }
-    }
-    if (uninit) {
-        ctx->shadingsys().error ("Detected possible use of uninitialized value in %s at %s:%d",
-                                 USTR(symbolname).c_str(),
-                                 USTR(sourcefile).c_str(), sourceline);
-    }
-}
-
-
-
-#ifdef OSL_LLVM_NO_BITCODE
-OSL_NAMESPACE_ENTER
-namespace pvt {
-
-// This symbol is strictly to force linkage of this file when building
-// static library.
-int llvm_ops_cpp_dummy = 1;
-
-} // end namespace pvt
-OSL_NAMESPACE_EXIT
-#endif
