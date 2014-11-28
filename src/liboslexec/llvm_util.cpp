@@ -782,34 +782,16 @@ LLVM_Util::type_union(const std::vector<llvm::Type *> &types)
 #else
     llvm::TargetData target(module());
 #endif
-#endif
-};
-
-
-
-
-LLVM_Util::LLVM_Util ()
-    : m_thread(NULL), m_llvm_context(NULL), m_llvm_module(NULL),
-      m_builder(NULL), m_llvm_jitmm(NULL),
-      m_current_function(NULL),
-      m_llvm_passes(NULL), m_llvm_func_passes(NULL),
-      m_llvm_exec(NULL)
-{
-    SetupLLVM ();
-    m_thread = PerThreadInfo::get();
-    ASSERT (m_thread);
-
-    {
-        OIIO::spin_lock lock (llvm_global_mutex);
-        if (! m_thread->llvm_context)
-            m_thread->llvm_context = new llvm::LLVMContext();
-
-        if (! m_thread->llvm_jitmm) {
-            m_thread->llvm_jitmm = llvm::JITMemoryManager::CreateDefaultMemManager();
-            ASSERT (m_thread->llvm_jitmm);
-            jitmm_hold.push_back (shared_ptr<llvm::JITMemoryManager>(m_thread->llvm_jitmm));
-        }
+    size_t max_size = 0;
+    size_t max_align = 1;
+    for (size_t i = 0; i < types.size(); ++i) {
+        size_t size = target.getTypeStoreSize(types[i]);
+        size_t align = target.getABITypeAlignment(types[i]);
+        max_size  = size  > max_size  ? size  : max_size;
+        max_align = align > max_align ? align : max_align;
     }
+    size_t padding = (max_size % max_align) ? max_align - (max_size % max_align) : 0;
+    size_t union_size = max_size + padding;
 
     llvm::Type * base_type = NULL;
     // to ensure the alignment when included in a struct use
@@ -823,32 +805,8 @@ LLVM_Util::LLVM_Util ()
     else
         base_type = (llvm::Type *) llvm::Type::getInt8Ty (context());
 
-    // Set up aliases for types we use over and over
-    m_llvm_type_float = (llvm::Type *) llvm::Type::getFloatTy (*m_llvm_context);
-    m_llvm_type_int = (llvm::Type *) llvm::Type::getInt32Ty (*m_llvm_context);
-    if (sizeof(char *) == 4)
-        m_llvm_type_addrint = (llvm::Type *) llvm::Type::getInt32Ty (*m_llvm_context);
-    else
-        m_llvm_type_addrint = (llvm::Type *) llvm::Type::getInt64Ty (*m_llvm_context);
-    m_llvm_type_int_ptr = (llvm::PointerType *) llvm::Type::getInt32PtrTy (*m_llvm_context);
-    m_llvm_type_bool = (llvm::Type *) llvm::Type::getInt1Ty (*m_llvm_context);
-    m_llvm_type_char = (llvm::Type *) llvm::Type::getInt8Ty (*m_llvm_context);
-    m_llvm_type_longlong = (llvm::Type *) llvm::Type::getInt64Ty (*m_llvm_context);
-    m_llvm_type_void = (llvm::Type *) llvm::Type::getVoidTy (*m_llvm_context);
-    m_llvm_type_char_ptr = (llvm::PointerType *) llvm::Type::getInt8PtrTy (*m_llvm_context);
-    m_llvm_type_float_ptr = (llvm::PointerType *) llvm::Type::getFloatPtrTy (*m_llvm_context);
-    m_llvm_type_ustring_ptr = (llvm::PointerType *) llvm::PointerType::get (m_llvm_type_char_ptr, 0);
-    m_llvm_type_void_ptr = m_llvm_type_char_ptr;
-
-    // A triple is a struct composed of 3 floats
-    std::vector<llvm::Type*> triplefields(3, m_llvm_type_float);
-    m_llvm_type_triple = type_struct (triplefields, "Vec3");
-    m_llvm_type_triple_ptr = (llvm::PointerType *) llvm::PointerType::get (m_llvm_type_triple, 0);
-
-    // A matrix is a struct composed 16 floats
-    std::vector<llvm::Type*> matrixfields(16, m_llvm_type_float);
-    m_llvm_type_matrix = type_struct (matrixfields, "Matrix4");
-    m_llvm_type_matrix_ptr = (llvm::PointerType *) llvm::PointerType::get (m_llvm_type_matrix, 0);
+    size_t array_len = union_size / target.getTypeStoreSize(base_type);
+    return (llvm::Type *) llvm::ArrayType::get (base_type, array_len);
 }
 
 
@@ -1549,11 +1507,6 @@ LLVM_Util::write_bitcode_file (const char *filename, std::string *err)
 }
 
 
-llvm::Value *
-LLVM_Util::op_or (llvm::Value *a, llvm::Value *b)
-{
-    return builder().CreateOr (a, b);
-}
 
 std::string
 LLVM_Util::bitcode_string (llvm::Function *func)
